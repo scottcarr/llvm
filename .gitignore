@@ -21,6 +21,13 @@
 #OS X specific files.
 .DS_store
 
+# added by Scott !!
+*.inc
+*.cmake
+*.ll
+*.dir
+*.gen
+
 #==============================================================================#
 # Explicit files to ignore (only matches one).
 #==============================================================================#
@@ -33,6 +40,7 @@ autoconf/autom4te.cache
 compile_commands.json
 
 # added by Scott !!
+Makefile.llvmbuild
 Makefile.config
 bindings/ocaml/llvm/META.llvm
 config.log
@@ -64,3 +72,14 @@ tools/lld
 tools/polly
 # Sphinx build tree, if building in-source dir.
 docs/_build
+
+# added by Scott !!
+tools
+projects
+Debug+Asserts/*
+*/Debug+Asserts/*
+*/Debug+Asserts/*
+*/*/Debug+Asserts/*
+*/*/*/Debug+Asserts/*
+*/*/*/*/Debug+Asserts/*
+unittests
