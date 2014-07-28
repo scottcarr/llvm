@@ -1,3 +1,3 @@
 #!/bin/sh
-../../../Debug+Asserts/bin/opt test.ll -load ../../../Debug+Asserts/lib/mine.so -mine > /dev/null
+../../../Debug+Asserts/bin/opt test.ll -load ../../../Debug+Asserts/lib/ScottsPass.so -ScottsPass > /dev/null
 
