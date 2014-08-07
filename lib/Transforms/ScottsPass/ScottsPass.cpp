@@ -1,3 +1,5 @@
+#include <unordered_set>
+
 #include "llvm/Pass.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
@@ -8,44 +10,66 @@
 #include "llvm/IR/InstrTypes.h"
 
 using namespace llvm;
+using namespace std;
 
-struct MyAnnotation{
-    public:
-    void* p0;
-    void* p1;
-    void* p2;
-    int i0;
-};
-
-void printType(Type &type) {
-    Type::TypeID tid = type.getTypeID();
-    Type* pointee;
-    switch (tid) {
-        case Type::PointerTyID: 
-            pointee = type.getPointerElementType();
-            errs() << "*";
-            printType(*pointee);
-            break;
-        case Type::IntegerTyID:
-            errs() << "int\n";
-            break;
-        default:
-            errs() << "unknown type \n";
-            return;
-    }
-}
-
-void printPointeeString(Constant *c) {
+StringRef getPointeeString(Constant *c) {
+    errs() << c->getNumOperands() << "\n";
     Constant* o0 = (Constant*)c->getOperand(0);
     Constant* o1 = (Constant*)c->getOperand(1);
     Constant* o2 = (Constant*)c->getOperand(2);
 
-    //errs() << o00 << "\n";
     ConstantDataSequential* o00 = (ConstantDataSequential*)o0->getOperand(0);
-    //ArrayType* aty = o00->getType();
-    //errs() << aty->getNumElements() << "\n";
-    errs() << o00->getAsCString() << "\n";
+    return o00->getAsCString();
 }
+
+
+unordered_set<Type*> annotatedTypes;
+
+class MyAnnotation{
+    public:
+    MyAnnotation(Value* val, Constant* annotation, Constant* filename, Constant* linenum, Module& m) :
+        Val(val), Annotation(annotation), Filename(filename), Linenum(linenum), M(m) { }
+    friend ostream& operator<<(ostream &o, const MyAnnotation& ma);
+    void dump() {
+        errs() << "Value: {";
+        dumpValue(Val);
+        errs() << "}\n";
+        errs() << "Annotation: {";
+        dumpConstant(Annotation);
+        errs() << "}\n";
+        errs() << "FileName: {";
+        dumpConstant(Filename);
+        errs() << "}\n";
+        errs() << "Line #: ";
+        Linenum->printAsOperand(errs(), false, &M);
+        errs() << "\n";
+    }
+    void dumpConstant(Constant* c) {
+        for (size_t i = 0; i < c->getNumOperands(); i++) {
+            Constant *v = (Constant*)c->getOperand(i);
+            if (i == 0) {
+                ConstantDataSequential* s = (ConstantDataSequential*) v->getOperand(0);
+                errs() << s->getAsCString();
+            } else {
+                errs() << ", ";
+                v->printAsOperand(errs(), false, &M);
+            }
+        }
+    }
+    void dumpValue(Value* v) {
+        errs() << v->getName() << ", ";
+        v->getType()->print(errs());
+    }
+    Type* getType() {
+        return Val->getType();
+    }
+    private:
+    Value* Val;
+    Constant* Annotation;
+    Constant* Filename;
+    Constant* Linenum;
+    const Module& M;
+};
 
 namespace {
     struct ScottsPass: public ModulePass {
@@ -58,72 +82,29 @@ namespace {
                     I != E;
                     ++I) {
                 if (I->getName() == "llvm.global.annotations") {
-                    //errs() << "found it\n";
-                    //errs() << I->getSection() << "\n";
-                    //I->printAsOperand(errs(), true, &M);
-                    //errs() << "\n";
-                    //errs() << I->getNumOperands() << "\n";
-
                     Value *Op0 = I->getOperand(0);
-                    //Op0->printAsOperand(errs(), true, &M);
-                    //errs() << "\n";
-
                     ConstantArray *arr = (ConstantArray*)(Op0);
-                    ConstantStruct *annoStruct = (ConstantStruct*)(arr->getOperand(0));
+                    for (size_t i = 0; i < arr->getNumOperands(); i++) {
+                        ConstantStruct *annoStruct = (ConstantStruct*)(arr->getOperand(i));
+                        Constant* cast = annoStruct->getOperand(0);
+                        Value* val = cast->getOperand(0);
+                        Constant* ann = annoStruct->getOperand(1);
+                        Constant* file = annoStruct->getOperand(2);
+                        Constant* num = annoStruct->getOperand(3);
 
-                    //errs() << annoStruct->getNumOperands() << "\n";
+                        MyAnnotation ma(val, ann, file, num, M);
+                        ma.dump();
 
-                    Constant* cast = annoStruct->getOperand(0);
-                    Value* val = cast->getOperand(0);
-                    //Value* var = annoStruct->getOperand(0);
-                    Constant* ann = annoStruct->getOperand(1);
-                    Constant* loc = annoStruct->getOperand(2);
-                    Constant* num = annoStruct->getOperand(3);
-
-
-                    //errs() << val->getNumOperands() << "\n";
-
-                    errs() << "Annotated variable: " << val->getName() << " : ";
-                    printType(*val->getType());
-                    errs() << "Annotated as: ";
-                    printPointeeString(ann);
-
-                    //val->printAsOperand(errs(), true, &M);
-                    //errs() << "\n";
-                    //ann->printAsOperand(errs(), true, &M);
-                    //errs() << "\n";
-                    //errs() << ann->getNumOperands() << "\n";
-                    //o00->printAsOperand(errs(), true, &M);
-                    //errs() << "\n";
-
-                    //errs() << o00->getSplatValue << "\n";
-                    //o0->printAsOperand(errs(), true, &M);
-                    //errs() << "\n";
-                    //o1->printAsOperand(errs(), true, &M);
-                    //errs() << "\n";
-                    //o2->printAsOperand(errs(), true, &M);
-                    //errs() << "\n";
-
-                    errs() << "In file: ";
-                    printPointeeString(loc);
-                    //loc->printAsOperand(errs(), true, &M);
-                    //errs() << "\n";
-
-                    // I have no idea what this number means
-                    num->printAsOperand(errs(), true, &M);
-                    errs() << "\n";
-
-                    //Value *Op1 = Op0->getOperand(0);
-                    //Op1->printAsOperand(errs(), true, &M);
-                    //errs() << "\n";
-                    //MyAnnotation *ann = (MyAnnotation*)Op0;
-                    //errs() << ann->p0 << "\n";
-                    //errs() << ann->p1 << "\n";
-                    //errs() << ann->p2 << "\n";
-                    //errs() << ann->i0 << "\n";
-
+                        annotatedTypes.insert(ma.getType());
+                    }
                 }
             }
+            errs() << "Annotated types: ";
+            for (unordered_set<Type*>::iterator t = annotatedTypes.begin(); t != annotatedTypes.end(); t++) {
+                (*t)->dump();
+                errs() << " ";
+            }
+            errs() << "\n";
             return false;
         }
     };
@@ -132,19 +113,3 @@ namespace {
 char ScottsPass::ID = 0;
 static RegisterPass<ScottsPass> X("ScottsPass", "Scott's pass", false, false);
 
-/*
-namespace {
-    struct mine: public FunctionPass {
-        static char ID;
-        mine() : FunctionPass(ID) {}
-        virtual bool runOnFunction(Function &F) {
-            errs() << "Hello: ";
-            errs().write_escaped(F.getName()) << "\n";
-            return false;
-        }
-    };
-}
-
-char mine::ID = 0;
-static RegisterPass<mine> X("mine", "mine pass", false, false);
-*/
