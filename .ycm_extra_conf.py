@@ -35,7 +35,7 @@ from tempfile import TemporaryFile
 
 # SCOTT: my stuff
 tmpFile = TemporaryFile(mode="w+")
-call(["/home/carr27/sunblaze-ucb/hacking/build/Debug+Asserts/bin/llvm-config", "--includedir"], stdout=tmpFile)
+call(["../build/bin/llvm-config", "--includedir"], stdout=tmpFile)
 tmpFile.seek(0)
 LLVMINC = tmpFile.read().strip()
 print LLVMINC
@@ -47,7 +47,7 @@ flags = [
 '-Wall',
 '-Wextra',
 '-Werror',
-'-Wc++98-compat',
+#'-Wc++98-compat',
 '-Wno-long-long',
 '-Wno-variadic-macros',
 '-fexceptions',
