@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "MipsSEISelLowering.h"
+#include "MipsMachineFunction.h"
 #include "MipsRegisterInfo.h"
 #include "MipsTargetMachine.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -34,7 +35,7 @@ static cl::opt<bool> NoDPLoadStore("mno-ldc1-sdc1", cl::init(false),
                                             "stores to their single precision "
                                             "counterparts"));
 
-MipsSETargetLowering::MipsSETargetLowering(MipsTargetMachine &TM,
+MipsSETargetLowering::MipsSETargetLowering(const MipsTargetMachine &TM,
                                            const MipsSubtarget &STI)
     : MipsTargetLowering(TM, STI) {
   // Set up the register classes
@@ -127,6 +128,8 @@ MipsSETargetLowering::MipsSETargetLowering(MipsTargetMachine &TM,
   if (Subtarget.isGP64bit()) {
     setOperationAction(ISD::MULHS,            MVT::i64, Custom);
     setOperationAction(ISD::MULHU,            MVT::i64, Custom);
+    setOperationAction(ISD::SDIVREM,          MVT::i64, Custom);
+    setOperationAction(ISD::UDIVREM,          MVT::i64, Custom);
   }
 
   setOperationAction(ISD::INTRINSIC_WO_CHAIN, MVT::i64, Custom);
@@ -134,8 +137,6 @@ MipsSETargetLowering::MipsSETargetLowering(MipsTargetMachine &TM,
 
   setOperationAction(ISD::SDIVREM, MVT::i32, Custom);
   setOperationAction(ISD::UDIVREM, MVT::i32, Custom);
-  setOperationAction(ISD::SDIVREM, MVT::i64, Custom);
-  setOperationAction(ISD::UDIVREM, MVT::i64, Custom);
   setOperationAction(ISD::ATOMIC_FENCE,       MVT::Other, Custom);
   setOperationAction(ISD::LOAD,               MVT::i32, Custom);
   setOperationAction(ISD::STORE,              MVT::i32, Custom);
@@ -227,7 +228,7 @@ MipsSETargetLowering::MipsSETargetLowering(MipsTargetMachine &TM,
 }
 
 const MipsTargetLowering *
-llvm::createMipsSETargetLowering(MipsTargetMachine &TM,
+llvm::createMipsSETargetLowering(const MipsTargetMachine &TM,
                                  const MipsSubtarget &STI) {
   return new MipsSETargetLowering(TM, STI);
 }
@@ -578,10 +579,9 @@ static SDValue performANDCombine(SDNode *N, SelectionDAG &DAG,
     if ((Op0Opcode == MipsISD::VEXTRACT_ZEXT_ELT && Log2 >= ExtendTySize) ||
         Log2 == ExtendTySize) {
       SDValue Ops[] = { Op0->getOperand(0), Op0->getOperand(1), Op0Op2 };
-      DAG.MorphNodeTo(Op0.getNode(), MipsISD::VEXTRACT_ZEXT_ELT,
-                      Op0->getVTList(),
-                      makeArrayRef(Ops, Op0->getNumOperands()));
-      return Op0;
+      return DAG.getNode(MipsISD::VEXTRACT_ZEXT_ELT, SDLoc(Op0),
+                         Op0->getVTList(),
+                         makeArrayRef(Ops, Op0->getNumOperands()));
     }
   }
 
@@ -923,10 +923,9 @@ static SDValue performSRACombine(SDNode *N, SelectionDAG &DAG,
            TotalBits <= 32)) {
         SDValue Ops[] = { Op0Op0->getOperand(0), Op0Op0->getOperand(1),
                           Op0Op0->getOperand(2) };
-        DAG.MorphNodeTo(Op0Op0.getNode(), MipsISD::VEXTRACT_SEXT_ELT,
-                        Op0Op0->getVTList(),
-                        makeArrayRef(Ops, Op0Op0->getNumOperands()));
-        return Op0Op0;
+        return DAG.getNode(MipsISD::VEXTRACT_SEXT_ELT, SDLoc(Op0Op0),
+                           Op0Op0->getVTList(),
+                           makeArrayRef(Ops, Op0Op0->getNumOperands()));
       }
     }
   }
@@ -1168,15 +1167,14 @@ MipsSETargetLowering::EmitInstrWithCustomInserter(MachineInstr *MI,
   }
 }
 
-bool MipsSETargetLowering::
-isEligibleForTailCallOptimization(const MipsCC &MipsCCInfo,
-                                  unsigned NextStackOffset,
-                                  const MipsFunctionInfo& FI) const {
+bool MipsSETargetLowering::isEligibleForTailCallOptimization(
+    const CCState &CCInfo, unsigned NextStackOffset,
+    const MipsFunctionInfo &FI) const {
   if (!EnableMipsTailCalls)
     return false;
 
   // Return false if either the callee or caller has a byval argument.
-  if (MipsCCInfo.hasByValArg() || FI.hasByvalArg())
+  if (CCInfo.getInRegsParamsCount() > 0 || FI.hasByvalArg())
     return false;
 
   // Return true if the callee's argument area is no larger than the
@@ -1188,10 +1186,12 @@ void MipsSETargetLowering::
 getOpndList(SmallVectorImpl<SDValue> &Ops,
             std::deque< std::pair<unsigned, SDValue> > &RegsToPass,
             bool IsPICCall, bool GlobalOrExternal, bool InternalLinkage,
-            CallLoweringInfo &CLI, SDValue Callee, SDValue Chain) const {
+            bool IsCallReloc, CallLoweringInfo &CLI, SDValue Callee,
+            SDValue Chain) const {
   Ops.push_back(Callee);
   MipsTargetLowering::getOpndList(Ops, RegsToPass, IsPICCall, GlobalOrExternal,
-                                  InternalLinkage, CLI, Callee, Chain);
+                                  InternalLinkage, IsCallReloc, CLI, Callee,
+                                  Chain);
 }
 
 SDValue MipsSETargetLowering::lowerLOAD(SDValue Op, SelectionDAG &DAG) const {
@@ -2747,7 +2747,8 @@ emitBPOSGE32(MachineInstr *MI, MachineBasicBlock *BB) const{
   //  $vr0 = phi($vr2, $fbb, $vr1, $tbb)
 
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   const TargetRegisterClass *RC = &Mips::GPR32RegClass;
   DebugLoc DL = MI->getDebugLoc();
   const BasicBlock *LLVM_BB = BB->getBasicBlock();
@@ -2812,7 +2813,8 @@ emitMSACBranchPseudo(MachineInstr *MI, MachineBasicBlock *BB,
   //  $rd = phi($rd1, $fbb, $rd2, $tbb)
 
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   const TargetRegisterClass *RC = &Mips::GPR32RegClass;
   DebugLoc DL = MI->getDebugLoc();
   const BasicBlock *LLVM_BB = BB->getBasicBlock();
@@ -2873,7 +2875,8 @@ emitMSACBranchPseudo(MachineInstr *MI, MachineBasicBlock *BB,
 // for lane 1 because it would require FR=0 mode which isn't supported by MSA.
 MachineBasicBlock * MipsSETargetLowering::
 emitCOPY_FW(MachineInstr *MI, MachineBasicBlock *BB) const{
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
   DebugLoc DL = MI->getDebugLoc();
   unsigned Fd = MI->getOperand(0).getReg();
@@ -2907,7 +2910,8 @@ MachineBasicBlock * MipsSETargetLowering::
 emitCOPY_FD(MachineInstr *MI, MachineBasicBlock *BB) const{
   assert(Subtarget.isFP64bit());
 
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
   unsigned Fd  = MI->getOperand(0).getReg();
   unsigned Ws  = MI->getOperand(1).getReg();
@@ -2936,7 +2940,8 @@ emitCOPY_FD(MachineInstr *MI, MachineBasicBlock *BB) const{
 MachineBasicBlock *
 MipsSETargetLowering::emitINSERT_FW(MachineInstr *MI,
                                     MachineBasicBlock *BB) const {
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
   DebugLoc DL = MI->getDebugLoc();
   unsigned Wd = MI->getOperand(0).getReg();
@@ -2970,7 +2975,8 @@ MipsSETargetLowering::emitINSERT_FD(MachineInstr *MI,
                                     MachineBasicBlock *BB) const {
   assert(Subtarget.isFP64bit());
 
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
   DebugLoc DL = MI->getDebugLoc();
   unsigned Wd = MI->getOperand(0).getReg();
@@ -3018,7 +3024,8 @@ MipsSETargetLowering::emitINSERT_DF_VIDX(MachineInstr *MI,
                                          MachineBasicBlock *BB,
                                          unsigned EltSizeInBytes,
                                          bool IsFP) const {
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
   DebugLoc DL = MI->getDebugLoc();
   unsigned Wd = MI->getOperand(0).getReg();
@@ -3128,7 +3135,8 @@ MipsSETargetLowering::emitINSERT_DF_VIDX(MachineInstr *MI,
 MachineBasicBlock *
 MipsSETargetLowering::emitFILL_FW(MachineInstr *MI,
                                   MachineBasicBlock *BB) const {
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
   DebugLoc DL = MI->getDebugLoc();
   unsigned Wd = MI->getOperand(0).getReg();
@@ -3159,7 +3167,8 @@ MipsSETargetLowering::emitFILL_FD(MachineInstr *MI,
                                   MachineBasicBlock *BB) const {
   assert(Subtarget.isFP64bit());
 
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
   DebugLoc DL = MI->getDebugLoc();
   unsigned Wd = MI->getOperand(0).getReg();
@@ -3187,7 +3196,8 @@ MipsSETargetLowering::emitFILL_FD(MachineInstr *MI,
 MachineBasicBlock *
 MipsSETargetLowering::emitFEXP2_W_1(MachineInstr *MI,
                                     MachineBasicBlock *BB) const {
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
   const TargetRegisterClass *RC = &Mips::MSA128WRegClass;
   unsigned Ws1 = RegInfo.createVirtualRegister(RC);
@@ -3216,7 +3226,8 @@ MipsSETargetLowering::emitFEXP2_W_1(MachineInstr *MI,
 MachineBasicBlock *
 MipsSETargetLowering::emitFEXP2_D_1(MachineInstr *MI,
                                     MachineBasicBlock *BB) const {
-  const TargetInstrInfo *TII = getTargetMachine().getInstrInfo();
+  const TargetInstrInfo *TII =
+      getTargetMachine().getSubtargetImpl()->getInstrInfo();
   MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
   const TargetRegisterClass *RC = &Mips::MSA128DRegClass;
   unsigned Ws1 = RegInfo.createVirtualRegister(RC);

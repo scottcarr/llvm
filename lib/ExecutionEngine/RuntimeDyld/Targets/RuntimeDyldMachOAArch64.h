@@ -7,10 +7,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_RUNTIMEDYLDMACHOAARCH64_H
-#define LLVM_RUNTIMEDYLDMACHOAARCH64_H
+#ifndef LLVM_LIB_EXECUTIONENGINE_RUNTIMEDYLD_TARGETS_RUNTIMEDYLDMACHOAARCH64_H
+#define LLVM_LIB_EXECUTIONENGINE_RUNTIMEDYLD_TARGETS_RUNTIMEDYLDMACHOAARCH64_H
 
 #include "../RuntimeDyldMachO.h"
+#include "llvm/Support/Endian.h"
 
 #define DEBUG_TYPE "dyld"
 
@@ -19,6 +20,9 @@ namespace llvm {
 class RuntimeDyldMachOAArch64
     : public RuntimeDyldMachOCRTPBase<RuntimeDyldMachOAArch64> {
 public:
+
+  typedef uint64_t TargetPtrT;
+
   RuntimeDyldMachOAArch64(RTDyldMemoryManager *MM)
       : RuntimeDyldMachOCRTPBase(MM) {}
 
@@ -27,15 +31,17 @@ public:
   unsigned getStubAlignment() override { return 8; }
 
   /// Extract the addend encoded in the instruction / memory location.
-  int64_t decodeAddend(uint8_t *LocalAddress, unsigned NumBytes,
-                       uint32_t RelType) const {
+  int64_t decodeAddend(const RelocationEntry &RE) const {
+    const SectionEntry &Section = Sections[RE.SectionID];
+    uint8_t *LocalAddress = Section.Address + RE.Offset;
+    unsigned NumBytes = 1 << RE.Size;
     int64_t Addend = 0;
     // Verify that the relocation has the correct size and alignment.
-    switch (RelType) {
+    switch (RE.RelType) {
     default:
       llvm_unreachable("Unsupported relocation type!");
     case MachO::ARM64_RELOC_UNSIGNED:
-      assert((NumBytes >= 4 && NumBytes <= 8) && "Invalid relocation size.");
+      assert((NumBytes == 4 || NumBytes == 8) && "Invalid relocation size.");
       break;
     case MachO::ARM64_RELOC_BRANCH26:
     case MachO::ARM64_RELOC_PAGE21:
@@ -48,16 +54,19 @@ public:
       break;
     }
 
-    switch (RelType) {
+    switch (RE.RelType) {
     default:
       llvm_unreachable("Unsupported relocation type!");
     case MachO::ARM64_RELOC_UNSIGNED:
-      // This could be an unaligned memory location - use memcpy.
-      memcpy(&Addend, LocalAddress, NumBytes);
+      // This could be an unaligned memory location.
+      if (NumBytes == 4)
+        Addend = *reinterpret_cast<support::ulittle32_t *>(LocalAddress);
+      else
+        Addend = *reinterpret_cast<support::ulittle64_t *>(LocalAddress);
       break;
     case MachO::ARM64_RELOC_BRANCH26: {
       // Verify that the relocation points to the expected branch instruction.
-      uint32_t *p = (uint32_t *)LocalAddress;
+      auto *p = reinterpret_cast<support::aligned_ulittle32_t *>(LocalAddress);
       assert((*p & 0xFC000000) == 0x14000000 && "Expected branch instruction.");
 
       // Get the 26 bit addend encoded in the branch instruction and sign-extend
@@ -70,7 +79,7 @@ public:
     case MachO::ARM64_RELOC_GOT_LOAD_PAGE21:
     case MachO::ARM64_RELOC_PAGE21: {
       // Verify that the relocation points to the expected adrp instruction.
-      uint32_t *p = (uint32_t *)LocalAddress;
+      auto *p = reinterpret_cast<support::aligned_ulittle32_t *>(LocalAddress);
       assert((*p & 0x9F000000) == 0x90000000 && "Expected adrp instruction.");
 
       // Get the 21 bit addend encoded in the adrp instruction and sign-extend
@@ -83,7 +92,7 @@ public:
     case MachO::ARM64_RELOC_GOT_LOAD_PAGEOFF12: {
       // Verify that the relocation points to one of the expected load / store
       // instructions.
-      uint32_t *p = (uint32_t *)LocalAddress;
+      auto *p = reinterpret_cast<support::aligned_ulittle32_t *>(LocalAddress);
       (void)p;
       assert((*p & 0x3B000000) == 0x39000000 &&
              "Only expected load / store instructions.");
@@ -91,7 +100,7 @@ public:
     case MachO::ARM64_RELOC_PAGEOFF12: {
       // Verify that the relocation points to one of the expected load / store
       // or add / sub instructions.
-      uint32_t *p = (uint32_t *)LocalAddress;
+      auto *p = reinterpret_cast<support::aligned_ulittle32_t *>(LocalAddress);
       assert((((*p & 0x3B000000) == 0x39000000) ||
               ((*p & 0x11C00000) == 0x11000000)   ) &&
              "Expected load / store  or add/sub instruction.");
@@ -120,19 +129,21 @@ public:
   }
 
   /// Extract the addend encoded in the instruction.
-  void encodeAddend(uint8_t *LocalAddress, uint32_t RelType,
-                    int64_t Addend) const {
+  void encodeAddend(uint8_t *LocalAddress, unsigned NumBytes,
+                    MachO::RelocationInfoType RelType, int64_t Addend) const {
     // Verify that the relocation has the correct alignment.
     switch (RelType) {
     default:
       llvm_unreachable("Unsupported relocation type!");
     case MachO::ARM64_RELOC_UNSIGNED:
-      llvm_unreachable("Invalid relocation type for instruction.");
+      assert((NumBytes == 4 || NumBytes == 8) && "Invalid relocation size.");
+      break;
     case MachO::ARM64_RELOC_BRANCH26:
     case MachO::ARM64_RELOC_PAGE21:
     case MachO::ARM64_RELOC_PAGEOFF12:
     case MachO::ARM64_RELOC_GOT_LOAD_PAGE21:
     case MachO::ARM64_RELOC_GOT_LOAD_PAGEOFF12:
+      assert(NumBytes == 4 && "Invalid relocation size.");
       assert((((uintptr_t)LocalAddress & 0x3) == 0) &&
              "Instruction address is not aligned to 4 bytes.");
       break;
@@ -141,9 +152,16 @@ public:
     switch (RelType) {
     default:
       llvm_unreachable("Unsupported relocation type!");
+    case MachO::ARM64_RELOC_UNSIGNED:
+      // This could be an unaligned memory location.
+      if (NumBytes == 4)
+        *reinterpret_cast<support::ulittle32_t *>(LocalAddress) = Addend;
+      else
+        *reinterpret_cast<support::ulittle64_t *>(LocalAddress) = Addend;
+      break;
     case MachO::ARM64_RELOC_BRANCH26: {
+      auto *p = reinterpret_cast<support::aligned_ulittle32_t *>(LocalAddress);
       // Verify that the relocation points to the expected branch instruction.
-      uint32_t *p = (uint32_t *)LocalAddress;
       assert((*p & 0xFC000000) == 0x14000000 && "Expected branch instruction.");
 
       // Verify addend value.
@@ -157,7 +175,7 @@ public:
     case MachO::ARM64_RELOC_GOT_LOAD_PAGE21:
     case MachO::ARM64_RELOC_PAGE21: {
       // Verify that the relocation points to the expected adrp instruction.
-      uint32_t *p = (uint32_t *)LocalAddress;
+      auto *p = reinterpret_cast<support::aligned_ulittle32_t *>(LocalAddress);
       assert((*p & 0x9F000000) == 0x90000000 && "Expected adrp instruction.");
 
       // Check that the addend fits into 21 bits (+ 12 lower bits).
@@ -173,7 +191,7 @@ public:
     case MachO::ARM64_RELOC_GOT_LOAD_PAGEOFF12: {
       // Verify that the relocation points to one of the expected load / store
       // instructions.
-      uint32_t *p = (uint32_t *)LocalAddress;
+      auto *p = reinterpret_cast<support::aligned_ulittle32_t *>(LocalAddress);
       assert((*p & 0x3B000000) == 0x39000000 &&
              "Only expected load / store instructions.");
       (void)p;
@@ -181,7 +199,7 @@ public:
     case MachO::ARM64_RELOC_PAGEOFF12: {
       // Verify that the relocation points to one of the expected load / store
       // or add / sub instructions.
-      uint32_t *p = (uint32_t *)LocalAddress;
+      auto *p = reinterpret_cast<support::aligned_ulittle32_t *>(LocalAddress);
       assert((((*p & 0x3B000000) == 0x39000000) ||
               ((*p & 0x11C00000) == 0x11000000)   ) &&
              "Expected load / store  or add/sub instruction.");
@@ -250,7 +268,8 @@ public:
       RelInfo = Obj.getRelocation(RelI->getRawDataRefImpl());
     }
 
-    RelocationEntry RE(getBasicRelocationEntry(SectionID, ObjImg, RelI));
+    RelocationEntry RE(getRelocationEntry(SectionID, ObjImg, RelI));
+    RE.Addend = decodeAddend(RE);
     RelocationValueRef Value(
         getRelocationValueRef(ObjImg, RelI, RE, ObjSectionToID, Symbols));
 
@@ -258,14 +277,14 @@ public:
       "ARM64_RELOC_ADDEND and embedded addend in the instruction.");
     if (ExplicitAddend) {
       RE.Addend = ExplicitAddend;
-      Value.Addend = ExplicitAddend;
+      Value.Offset = ExplicitAddend;
     }
 
     bool IsExtern = Obj.getPlainRelocationExternal(RelInfo);
     if (!IsExtern && RE.IsPCRel)
-      makeValueAddendPCRel(Value, ObjImg, RelI);
+      makeValueAddendPCRel(Value, ObjImg, RelI, 1 << RE.Size);
 
-    RE.Addend = Value.Addend;
+    RE.Addend = Value.Offset;
 
     if (RE.RelType == MachO::ARM64_RELOC_GOT_LOAD_PAGE21 ||
         RE.RelType == MachO::ARM64_RELOC_GOT_LOAD_PAGEOFF12)
@@ -280,13 +299,15 @@ public:
     return ++RelI;
   }
 
-  void resolveRelocation(const RelocationEntry &RE, uint64_t Value) {
+  void resolveRelocation(const RelocationEntry &RE, uint64_t Value) override {
     DEBUG(dumpRelocationToResolve(RE, Value));
 
     const SectionEntry &Section = Sections[RE.SectionID];
     uint8_t *LocalAddress = Section.Address + RE.Offset;
+    MachO::RelocationInfoType RelType =
+      static_cast<MachO::RelocationInfoType>(RE.RelType);
 
-    switch (RE.RelType) {
+    switch (RelType) {
     default:
       llvm_unreachable("Invalid relocation type!");
     case MachO::ARM64_RELOC_UNSIGNED: {
@@ -296,7 +317,7 @@ public:
       if (RE.Size < 2)
         llvm_unreachable("Invalid size for ARM64_RELOC_UNSIGNED");
 
-      writeBytesUnaligned(LocalAddress, Value + RE.Addend, 1 << RE.Size);
+      encodeAddend(LocalAddress, 1 << RE.Size, RelType, Value + RE.Addend);
       break;
     }
     case MachO::ARM64_RELOC_BRANCH26: {
@@ -304,7 +325,7 @@ public:
       // Check if branch is in range.
       uint64_t FinalAddress = Section.LoadAddress + RE.Offset;
       int64_t PCRelVal = Value - FinalAddress + RE.Addend;
-      encodeAddend(LocalAddress, RE.RelType, PCRelVal);
+      encodeAddend(LocalAddress, /*Size=*/4, RelType, PCRelVal);
       break;
     }
     case MachO::ARM64_RELOC_GOT_LOAD_PAGE21:
@@ -314,7 +335,7 @@ public:
       uint64_t FinalAddress = Section.LoadAddress + RE.Offset;
       int64_t PCRelVal =
         ((Value + RE.Addend) & (-4096)) - (FinalAddress & (-4096));
-      encodeAddend(LocalAddress, RE.RelType, PCRelVal);
+      encodeAddend(LocalAddress, /*Size=*/4, RelType, PCRelVal);
       break;
     }
     case MachO::ARM64_RELOC_GOT_LOAD_PAGEOFF12:
@@ -324,7 +345,7 @@ public:
       Value += RE.Addend;
       // Mask out the page address and only use the lower 12 bits.
       Value &= 0xFFF;
-      encodeAddend(LocalAddress, RE.RelType, Value);
+      encodeAddend(LocalAddress, /*Size=*/4, RelType, Value);
       break;
     }
     case MachO::ARM64_RELOC_SUBTRACTOR:
@@ -347,9 +368,9 @@ private:
     assert(RE.Size == 2);
     SectionEntry &Section = Sections[RE.SectionID];
     StubMap::const_iterator i = Stubs.find(Value);
-    uint8_t *Addr;
+    int64_t Offset;
     if (i != Stubs.end())
-      Addr = Section.Address + i->second;
+      Offset = static_cast<int64_t>(i->second);
     else {
       // FIXME: There must be a better way to do this then to check and fix the
       // alignment every time!!!
@@ -363,22 +384,22 @@ private:
       assert(((StubAddress % getStubAlignment()) == 0) &&
              "GOT entry not aligned");
       RelocationEntry GOTRE(RE.SectionID, StubOffset,
-                            MachO::ARM64_RELOC_UNSIGNED, Value.Addend,
+                            MachO::ARM64_RELOC_UNSIGNED, Value.Offset,
                             /*IsPCRel=*/false, /*Size=*/3);
       if (Value.SymbolName)
         addRelocationForSymbol(GOTRE, Value.SymbolName);
       else
         addRelocationForSection(GOTRE, Value.SectionID);
       Section.StubOffset = StubOffset + getMaxStubSize();
-      Addr = (uint8_t *)StubAddress;
+      Offset = static_cast<int64_t>(StubOffset);
     }
-    RelocationEntry TargetRE(RE.SectionID, RE.Offset, RE.RelType, /*Addend=*/0,
+    RelocationEntry TargetRE(RE.SectionID, RE.Offset, RE.RelType, Offset,
                              RE.IsPCRel, RE.Size);
-    resolveRelocation(TargetRE, (uint64_t)Addr);
+    addRelocationForSection(TargetRE, RE.SectionID);
   }
 };
 }
 
 #undef DEBUG_TYPE
 
-#endif // LLVM_RUNTIMEDYLDMACHOAARCH64_H
+#endif

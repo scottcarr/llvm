@@ -241,6 +241,9 @@ def HasDB            : Predicate<"Subtarget->hasDataBarrier()">,
 def HasMP            : Predicate<"Subtarget->hasMPExtension()">,
                                  AssemblerPredicate<"FeatureMP",
                                                     "mp-extensions">;
+def HasVirtualization: Predicate<"false">,
+                                 AssemblerPredicate<"FeatureVirtualization",
+                                                   "virtualization-extensions">;
 def HasTrustZone     : Predicate<"Subtarget->hasTrustZone()">,
                                  AssemblerPredicate<"FeatureTrustZone",
                                                     "TrustZone">;
@@ -1963,7 +1966,7 @@ def SETEND : AXI<(outs), (ins setend_op:$end), MiscFrm, NoItinerary,
 }
 
 def DBG : AI<(outs), (ins imm0_15:$opt), MiscFrm, NoItinerary, "dbg", "\t$opt",
-             []>, Requires<[IsARM, HasV7]> {
+             [(int_arm_dbg imm0_15:$opt)]>, Requires<[IsARM, HasV7]> {
   bits<4> opt;
   let Inst{27-4} = 0b001100100000111100001111;
   let Inst{3-0} = opt;
@@ -3423,7 +3426,8 @@ def : ARMPat<(ARMaddc GPR:$src, imm0_65535_neg:$imm),
 def : ARMPat<(ARMadde GPR:$src, so_imm_not:$imm, CPSR),
              (SBCri   GPR:$src, so_imm_not:$imm)>;
 def : ARMPat<(ARMadde GPR:$src, imm0_65535_neg:$imm, CPSR),
-             (SBCrr   GPR:$src, (MOVi16 (imm_not_XFORM imm:$imm)))>;
+             (SBCrr   GPR:$src, (MOVi16 (imm_not_XFORM imm:$imm)))>,
+             Requires<[IsARM, HasV6T2]>;
 
 // Note: These are implemented in C++ code, because they have to generate
 // ADD/SUBrs instructions, which use a complex pattern that a xform function
@@ -3938,14 +3942,12 @@ multiclass AI_smul<string opc, PatFrag opnode> {
 
   def WB : AMulxyI<0b0001001, 0b01, (outs GPR:$Rd), (ins GPR:$Rn, GPR:$Rm),
               IIC_iMUL16, !strconcat(opc, "wb"), "\t$Rd, $Rn, $Rm",
-              [(set GPR:$Rd, (sra (opnode GPR:$Rn,
-                                    (sext_inreg GPR:$Rm, i16)), (i32 16)))]>,
+              []>,
            Requires<[IsARM, HasV5TE]>;
 
   def WT : AMulxyI<0b0001001, 0b11, (outs GPR:$Rd), (ins GPR:$Rn, GPR:$Rm),
               IIC_iMUL16, !strconcat(opc, "wt"), "\t$Rd, $Rn, $Rm",
-              [(set GPR:$Rd, (sra (opnode GPR:$Rn,
-                                    (sra GPR:$Rm, (i32 16))), (i32 16)))]>,
+              []>,
             Requires<[IsARM, HasV5TE]>;
 }
 
@@ -3987,17 +3989,13 @@ multiclass AI_smla<string opc, PatFrag opnode> {
   def WB : AMulxyIa<0b0001001, 0b00, (outs GPRnopc:$Rd),
               (ins GPRnopc:$Rn, GPRnopc:$Rm, GPR:$Ra),
               IIC_iMAC16, !strconcat(opc, "wb"), "\t$Rd, $Rn, $Rm, $Ra",
-              [(set GPRnopc:$Rd,
-                    (add GPR:$Ra, (sra (opnode GPRnopc:$Rn,
-                                  (sext_inreg GPRnopc:$Rm, i16)), (i32 16))))]>,
+              []>,
            Requires<[IsARM, HasV5TE, UseMulOps]>;
 
   def WT : AMulxyIa<0b0001001, 0b10, (outs GPRnopc:$Rd),
               (ins GPRnopc:$Rn, GPRnopc:$Rm, GPR:$Ra),
               IIC_iMAC16, !strconcat(opc, "wt"), "\t$Rd, $Rn, $Rm, $Ra",
-              [(set GPRnopc:$Rd,
-                 (add GPR:$Ra, (sra (opnode GPRnopc:$Rn,
-                                    (sra GPRnopc:$Rm, (i32 16))), (i32 16))))]>,
+              []>,
             Requires<[IsARM, HasV5TE, UseMulOps]>;
   }
 }
@@ -4117,7 +4115,7 @@ def UDIV : ADivA1I<0b011, (outs GPR:$Rd), (ins GPR:$Rn, GPR:$Rm), IIC_iDIV,
 //  Misc. Arithmetic Instructions.
 //
 
-def CLZ  : AMiscA1I<0b000010110, 0b0001, (outs GPR:$Rd), (ins GPR:$Rm),
+def CLZ  : AMiscA1I<0b00010110, 0b0001, (outs GPR:$Rd), (ins GPR:$Rm),
               IIC_iUNAr, "clz", "\t$Rd, $Rm",
               [(set GPR:$Rd, (ctlz GPR:$Rm))]>, Requires<[IsARM, HasV5T]>,
            Sched<[WriteALU]>;
@@ -4635,7 +4633,7 @@ def : ARMPat<(stlex_2 (and GPR:$Rt, 0xffff), addr_offset_none:$addr),
 class acquiring_load<PatFrag base>
   : PatFrag<(ops node:$ptr), (base node:$ptr), [{
   AtomicOrdering Ordering = cast<AtomicSDNode>(N)->getOrdering();
-  return Ordering == Acquire || Ordering == SequentiallyConsistent;
+  return isAtLeastAcquire(Ordering);
 }]>;
 
 def atomic_load_acquire_8  : acquiring_load<atomic_load_8>;
@@ -4645,7 +4643,7 @@ def atomic_load_acquire_32 : acquiring_load<atomic_load_32>;
 class releasing_store<PatFrag base>
   : PatFrag<(ops node:$ptr, node:$val), (base node:$ptr, node:$val), [{
   AtomicOrdering Ordering = cast<AtomicSDNode>(N)->getOrdering();
-  return Ordering == Release || Ordering == SequentiallyConsistent;
+  return isAtLeastRelease(Ordering);
 }]>;
 
 def atomic_store_release_8  : releasing_store<atomic_store_8>;
@@ -5066,12 +5064,31 @@ def MRSsys : ABI<0b0001, (outs GPRnopc:$Rd), (ins), NoItinerary,
   let Unpredictable{11-0} = 0b110100001111;
 }
 
+// However, the MRS (banked register) system instruction (ARMv7VE) *does* have a
+// separate encoding (distinguished by bit 5.
+def MRSbanked : ABI<0b0001, (outs GPRnopc:$Rd), (ins banked_reg:$banked),
+                    NoItinerary, "mrs", "\t$Rd, $banked", []>,
+                Requires<[IsARM, HasVirtualization]> {
+  bits<6> banked;
+  bits<4> Rd;
+
+  let Inst{23} = 0;
+  let Inst{22} = banked{5}; // R bit
+  let Inst{21-20} = 0b10;
+  let Inst{19-16} = banked{3-0};
+  let Inst{15-12} = Rd;
+  let Inst{11-9} = 0b001;
+  let Inst{8} = banked{4};
+  let Inst{7-0} = 0b00000000;
+}
+
 // Move from ARM core register to Special Register
 //
-// No need to have both system and application versions, the encodings are the
-// same and the assembly parser has no way to distinguish between them. The mask
-// operand contains the special register (R Bit) in bit 4 and bits 3-0 contains
-// the mask with the fields to be accessed in the special register.
+// No need to have both system and application versions of MSR (immediate) or
+// MSR (register), the encodings are the same and the assembly parser has no way
+// to distinguish between them. The mask operand contains the special register
+// (R Bit) in bit 4 and bits 3-0 contains the mask with the fields to be
+// accessed in the special register.
 def MSR : ABI<0b0001, (outs), (ins msr_mask:$mask, GPR:$Rn), NoItinerary,
               "msr", "\t$mask, $Rn", []> {
   bits<5> mask;
@@ -5097,6 +5114,25 @@ def MSRi : ABI<0b0011, (outs), (ins msr_mask:$mask,  so_imm:$a), NoItinerary,
   let Inst{19-16} = mask{3-0};
   let Inst{15-12} = 0b1111;
   let Inst{11-0} = a;
+}
+
+// However, the MSR (banked register) system instruction (ARMv7VE) *does* have a
+// separate encoding (distinguished by bit 5.
+def MSRbanked : ABI<0b0001, (outs), (ins banked_reg:$banked, GPRnopc:$Rn),
+                    NoItinerary, "msr", "\t$banked, $Rn", []>,
+                Requires<[IsARM, HasVirtualization]> {
+  bits<6> banked;
+  bits<4> Rn;
+
+  let Inst{23} = 0;
+  let Inst{22} = banked{5}; // R bit
+  let Inst{21-20} = 0b10;
+  let Inst{19-16} = banked{3-0};
+  let Inst{15-12} = 0b1111;
+  let Inst{11-9} = 0b001;
+  let Inst{8} = banked{4};
+  let Inst{7-4} = 0b0000;
+  let Inst{3-0} = Rn;
 }
 
 // Dynamic stack allocation yields a _chkstk for Windows targets.  These calls
@@ -5284,11 +5320,6 @@ def : ARMV5TEPat<(mul (sra GPR:$a, (i32 16)),
                  (SMULTB GPR:$a, GPR:$b)>;
 def : ARMV5TEPat<(mul (sra GPR:$a, (i32 16)), sext_16_node:$b),
                 (SMULTB GPR:$a, GPR:$b)>;
-def : ARMV5TEPat<(sra (mul GPR:$a, (sra (shl GPR:$b, (i32 16)), (i32 16))),
-                      (i32 16)),
-                 (SMULWB GPR:$a, GPR:$b)>;
-def : ARMV5TEPat<(sra (mul GPR:$a, sext_16_node:$b), (i32 16)),
-                 (SMULWB GPR:$a, GPR:$b)>;
 
 def : ARMV5MOPat<(add GPR:$acc,
                       (mul (sra (shl GPR:$a, (i32 16)), (i32 16)),
@@ -5311,13 +5342,6 @@ def : ARMV5MOPat<(add GPR:$acc,
 def : ARMV5MOPat<(add GPR:$acc,
                       (mul (sra GPR:$a, (i32 16)), sext_16_node:$b)),
                  (SMLATB GPR:$a, GPR:$b, GPR:$acc)>;
-def : ARMV5MOPat<(add GPR:$acc,
-                      (sra (mul GPR:$a, (sra (shl GPR:$b, (i32 16)), (i32 16))),
-                           (i32 16))),
-                 (SMLAWB GPR:$a, GPR:$b, GPR:$acc)>;
-def : ARMV5MOPat<(add GPR:$acc,
-                      (sra (mul GPR:$a, sext_16_node:$b), (i32 16))),
-                 (SMLAWB GPR:$a, GPR:$b, GPR:$acc)>;
 
 
 // Pre-v7 uses MCR for synchronization barriers.
@@ -5597,3 +5621,8 @@ def : InstAlias<"umull${s}${p} $RdLo, $RdHi, $Rn, $Rm",
 // is discarded.
 def ITasm : ARMAsmPseudo<"it$mask $cc", (ins it_pred:$cc, it_mask:$mask)>,
          ComplexDeprecationPredicate<"IT">;
+
+let mayLoad = 1, mayStore =1, hasSideEffects = 1 in
+def SPACE : PseudoInst<(outs GPR:$Rd), (ins i32imm:$size, GPR:$Rn),
+                       NoItinerary,
+                       [(set GPR:$Rd, (int_arm_space imm:$size, GPR:$Rn))]>;

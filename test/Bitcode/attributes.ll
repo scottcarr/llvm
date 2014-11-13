@@ -1,4 +1,5 @@
 ; RUN: llvm-as < %s | llvm-dis | FileCheck %s
+; RUN: verify-uselistorder < %s
 ; PR12696
 
 define void @f1(i8 zeroext)

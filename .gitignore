@@ -21,13 +21,6 @@
 #OS X specific files.
 .DS_store
 
-# added by Scott !!
-*.inc
-*.cmake
-*.ll
-*.dir
-*.gen
-
 #==============================================================================#
 # Explicit files to ignore (only matches one).
 #==============================================================================#
@@ -38,22 +31,6 @@ cscope.out
 autoconf/aclocal.m4
 autoconf/autom4te.cache
 compile_commands.json
-
-# added by Scott !!
-Makefile.llvmbuild
-Makefile.config
-bindings/ocaml/llvm/META.llvm
-config.log
-config.status
-docs/doxygen.cfg
-include/llvm/Config/AsmParsers.def
-include/llvm/Config/AsmPrinters.def
-include/llvm/Config/Disassemblers.def
-include/llvm/Config/Targets.def
-include/llvm/Config/config.h
-include/llvm/Config/llvm-config.h
-include/llvm/Support/DataTypes.h
-llvm.spec
 
 #==============================================================================#
 # Directories to ignore (do not add trailing '/'s, they skip symlinks).
@@ -73,13 +50,8 @@ tools/polly
 # Sphinx build tree, if building in-source dir.
 docs/_build
 
-# added by Scott !!
-tools
-projects
-Debug+Asserts/*
-*/Debug+Asserts/*
-*/Debug+Asserts/*
-*/*/Debug+Asserts/*
-*/*/*/Debug+Asserts/*
-*/*/*/*/Debug+Asserts/*
-unittests
+#==============================================================================#
+# Files created in tree by the Go bindings.
+#==============================================================================#
+bindings/go/llvm/llvm_config.go
+bindings/go/llvm/workdir

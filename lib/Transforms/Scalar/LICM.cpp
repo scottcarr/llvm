@@ -130,6 +130,9 @@ namespace {
     /// set.
     void deleteAnalysisValue(Value *V, Loop *L) override;
 
+    /// Simple Analysis hook. Delete loop L from alias set map.
+    void deleteAnalysisLoop(Loop *L) override;
+
     /// SinkRegion - Walk the specified region of the CFG (defined by all blocks
     /// dominated by the specified block, and that are in the current loop) in
     /// reverse depth first order w.r.t the DominatorTree.  This allows us to
@@ -441,7 +444,7 @@ bool LICM::canSinkOrHoistInst(Instruction &I) {
     // in the same alias set as something that ends up being modified.
     if (AA->pointsToConstantMemory(LI->getOperand(0)))
       return true;
-    if (LI->getMetadata("invariant.load"))
+    if (LI->getMetadata(LLVMContext::MD_invariant_load))
       return true;
 
     // Don't hoist loads which have may-aliased stores in loop.
@@ -597,8 +600,13 @@ void LICM::sink(Instruction &I) {
   // PHI nodes in exit blocks due to LCSSA form. Just RAUW them with clones of
   // the instruction.
   while (!I.use_empty()) {
+    Instruction *User = I.user_back();
+    if (!DT->isReachableFromEntry(User->getParent())) {
+      User->replaceUsesOfWith(&I, UndefValue::get(I.getType()));
+      continue;
+    }
     // The user must be a PHI node.
-    PHINode *PN = cast<PHINode>(I.user_back());
+    PHINode *PN = cast<PHINode>(User);
 
     BasicBlock *ExitBlock = PN->getParent();
     assert(ExitBlockSet.count(ExitBlock) &&
@@ -685,7 +693,7 @@ bool LICM::isGuaranteedToExecute(Instruction &Inst) {
 namespace {
   class LoopPromoter : public LoadAndStorePromoter {
     Value *SomePtr;  // Designated pointer to store to.
-    SmallPtrSet<Value*, 4> &PointerMustAliases;
+    SmallPtrSetImpl<Value*> &PointerMustAliases;
     SmallVectorImpl<BasicBlock*> &LoopExitBlocks;
     SmallVectorImpl<Instruction*> &LoopInsertPts;
     PredIteratorCache &PredCache;
@@ -713,7 +721,7 @@ namespace {
 
   public:
     LoopPromoter(Value *SP, const SmallVectorImpl<Instruction *> &Insts,
-                 SSAUpdater &S, SmallPtrSet<Value *, 4> &PMA,
+                 SSAUpdater &S, SmallPtrSetImpl<Value *> &PMA,
                  SmallVectorImpl<BasicBlock *> &LEB,
                  SmallVectorImpl<Instruction *> &LIP, PredIteratorCache &PIC,
                  AliasSetTracker &ast, LoopInfo &li, DebugLoc dl, int alignment,
@@ -937,4 +945,14 @@ void LICM::deleteAnalysisValue(Value *V, Loop *L) {
     return;
 
   AST->deleteValue(V);
+}
+
+/// Simple Analysis hook. Delete value L from alias set map.
+void LICM::deleteAnalysisLoop(Loop *L) {
+  AliasSetTracker *AST = LoopToAliasSetMap.lookup(L);
+  if (!AST)
+    return;
+
+  delete AST;
+  LoopToAliasSetMap.erase(L);
 }

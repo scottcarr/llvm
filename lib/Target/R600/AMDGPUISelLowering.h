@@ -13,8 +13,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef AMDGPUISELLOWERING_H
-#define AMDGPUISELLOWERING_H
+#ifndef LLVM_LIB_TARGET_R600_AMDGPUISELLOWERING_H
+#define LLVM_LIB_TARGET_R600_AMDGPUISELLOWERING_H
 
 #include "llvm/Target/TargetLowering.h"
 
@@ -43,25 +43,22 @@ private:
   /// \brief Split a vector store into multiple scalar stores.
   /// \returns The resulting chain.
 
-  SDValue LowerSDIV(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerSDIV24(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerSDIV32(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerSDIV64(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerSREM(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerSREM32(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerSREM64(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerUDIVREM(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerFREM(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFCEIL(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFTRUNC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFRINT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFNEARBYINT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFFLOOR(SDValue Op, SelectionDAG &DAG) const;
 
+  SDValue LowerINT_TO_FP64(SDValue Op, SelectionDAG &DAG, bool Signed) const;
   SDValue LowerUINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerSINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
 
-  SDValue ExpandSIGN_EXTEND_INREG(SDValue Op,
-                                  unsigned BitsDiff,
-                                  SelectionDAG &DAG) const;
+  SDValue LowerFP64_TO_INT(SDValue Op, SelectionDAG &DAG, bool Signed) const;
+  SDValue LowerFP_TO_UINT(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerFP_TO_SINT(SDValue Op, SelectionDAG &DAG) const;
+
   SDValue LowerSIGN_EXTEND_INREG(SDValue Op, SelectionDAG &DAG) const;
 
   SDValue performStoreCombine(SDNode *N, DAGCombinerInfo &DCI) const;
@@ -89,6 +86,7 @@ protected:
   SDValue LowerLOAD(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSTORE(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSDIVREM(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerDIVREM24(SDValue Op, SelectionDAG &DAG, bool sign) const;
   bool isHWTrueValue(SDValue Op) const;
   bool isHWFalseValue(SDValue Op) const;
 
@@ -159,10 +157,8 @@ public:
                                      const SelectionDAG &DAG,
                                      unsigned Depth = 0) const override;
 
-  virtual unsigned ComputeNumSignBitsForTargetNode(
-    SDValue Op,
-    const SelectionDAG &DAG,
-    unsigned Depth = 0) const override;
+  unsigned ComputeNumSignBitsForTargetNode(SDValue Op, const SelectionDAG &DAG,
+                                           unsigned Depth = 0) const override;
 
   /// \brief Helper function that adds Reg to the LiveIn list of the DAG's
   /// MachineFunction.
@@ -186,6 +182,7 @@ enum {
   DWORDADDR,
   FRACT,
   CLAMP,
+  MAD, // Multiply + add with same result as the separate operations.
 
   // SIN_HW, COS_HW - f32 for SI, 1 ULP max error, valid from -100 pi to 100 pi.
   // Denormals handled on some parts.
@@ -209,6 +206,7 @@ enum {
   RSQ,
   RSQ_LEGACY,
   RSQ_CLAMPED,
+  LDEXP,
   DOT4,
   BFE_U32, // Extract range of bits with zero extension to 32-bits.
   BFE_I32, // Extract range of bits with sign extension to 32-bits.
@@ -258,4 +256,4 @@ enum {
 
 } // End namespace llvm
 
-#endif // AMDGPUISELLOWERING_H
+#endif

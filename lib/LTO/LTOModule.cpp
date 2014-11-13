@@ -15,6 +15,7 @@
 #include "llvm/LTO/LTOModule.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Bitcode/ReaderWriter.h"
+#include "llvm/CodeGen/Analysis.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
@@ -28,6 +29,8 @@
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCTargetAsmParser.h"
 #include "llvm/MC/SubtargetFeature.h"
+#include "llvm/Object/IRObjectFile.h"
+#include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Host.h"
@@ -39,32 +42,51 @@
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetRegisterInfo.h"
+#include "llvm/Target/TargetSubtargetInfo.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
 #include <system_error>
 using namespace llvm;
+using namespace llvm::object;
 
 LTOModule::LTOModule(std::unique_ptr<object::IRObjectFile> Obj,
                      llvm::TargetMachine *TM)
     : IRFile(std::move(Obj)), _target(TM) {}
 
+LTOModule::LTOModule(std::unique_ptr<object::IRObjectFile> Obj,
+                     llvm::TargetMachine *TM,
+                     std::unique_ptr<LLVMContext> Context)
+    : OwnedContext(std::move(Context)), IRFile(std::move(Obj)), _target(TM) {}
+
+LTOModule::~LTOModule() {}
+
 /// isBitcodeFile - Returns 'true' if the file (or memory contents) is LLVM
 /// bitcode.
-bool LTOModule::isBitcodeFile(const void *mem, size_t length) {
-  return sys::fs::identify_magic(StringRef((const char *)mem, length)) ==
-         sys::fs::file_magic::bitcode;
+bool LTOModule::isBitcodeFile(const void *Mem, size_t Length) {
+  ErrorOr<MemoryBufferRef> BCData = IRObjectFile::findBitcodeInMemBuffer(
+      MemoryBufferRef(StringRef((const char *)Mem, Length), "<mem>"));
+  return bool(BCData);
 }
 
-bool LTOModule::isBitcodeFile(const char *path) {
-  sys::fs::file_magic type;
-  if (sys::fs::identify_magic(path, type))
+bool LTOModule::isBitcodeFile(const char *Path) {
+  ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrErr =
+      MemoryBuffer::getFile(Path);
+  if (!BufferOrErr)
     return false;
-  return type == sys::fs::file_magic::bitcode;
+
+  ErrorOr<MemoryBufferRef> BCData = IRObjectFile::findBitcodeInMemBuffer(
+      BufferOrErr.get()->getMemBufferRef());
+  return bool(BCData);
 }
 
-bool LTOModule::isBitcodeForTarget(MemoryBuffer *buffer,
-                                   StringRef triplePrefix) {
-  std::string Triple = getBitcodeTargetTriple(buffer, getGlobalContext());
-  return StringRef(Triple).startswith(triplePrefix);
+bool LTOModule::isBitcodeForTarget(MemoryBuffer *Buffer,
+                                   StringRef TriplePrefix) {
+  ErrorOr<MemoryBufferRef> BCOrErr =
+      IRObjectFile::findBitcodeInMemBuffer(Buffer->getMemBufferRef());
+  if (!BCOrErr)
+    return false;
+  LLVMContext Context;
+  std::string Triple = getBitcodeTargetTriple(*BCOrErr, Context);
+  return StringRef(Triple).startswith(TriplePrefix);
 }
 
 LTOModule *LTOModule::createFromFile(const char *path, TargetOptions options,
@@ -75,7 +97,9 @@ LTOModule *LTOModule::createFromFile(const char *path, TargetOptions options,
     errMsg = EC.message();
     return nullptr;
   }
-  return makeLTOModule(std::move(BufferOrErr.get()), options, errMsg);
+  std::unique_ptr<MemoryBuffer> Buffer = std::move(BufferOrErr.get());
+  return makeLTOModule(Buffer->getMemBufferRef(), options, errMsg,
+                       &getGlobalContext());
 }
 
 LTOModule *LTOModule::createFromOpenFile(int fd, const char *path, size_t size,
@@ -94,23 +118,50 @@ LTOModule *LTOModule::createFromOpenFileSlice(int fd, const char *path,
     errMsg = EC.message();
     return nullptr;
   }
-  return makeLTOModule(std::move(BufferOrErr.get()), options, errMsg);
+  std::unique_ptr<MemoryBuffer> Buffer = std::move(BufferOrErr.get());
+  return makeLTOModule(Buffer->getMemBufferRef(), options, errMsg,
+                       &getGlobalContext());
 }
 
 LTOModule *LTOModule::createFromBuffer(const void *mem, size_t length,
                                        TargetOptions options,
                                        std::string &errMsg, StringRef path) {
-  std::unique_ptr<MemoryBuffer> buffer(makeBuffer(mem, length, path));
-  if (!buffer)
-    return nullptr;
-  return makeLTOModule(std::move(buffer), options, errMsg);
+  return createInContext(mem, length, options, errMsg, path,
+                         &getGlobalContext());
 }
 
-LTOModule *LTOModule::makeLTOModule(std::unique_ptr<MemoryBuffer> Buffer,
-                                    TargetOptions options,
-                                    std::string &errMsg) {
-  ErrorOr<Module *> MOrErr =
-      getLazyBitcodeModule(Buffer.get(), getGlobalContext());
+LTOModule *LTOModule::createInLocalContext(const void *mem, size_t length,
+                                           TargetOptions options,
+                                           std::string &errMsg,
+                                           StringRef path) {
+  return createInContext(mem, length, options, errMsg, path, nullptr);
+}
+
+LTOModule *LTOModule::createInContext(const void *mem, size_t length,
+                                      TargetOptions options,
+                                      std::string &errMsg, StringRef path,
+                                      LLVMContext *Context) {
+  StringRef Data((const char *)mem, length);
+  MemoryBufferRef Buffer(Data, path);
+  return makeLTOModule(Buffer, options, errMsg, Context);
+}
+
+LTOModule *LTOModule::makeLTOModule(MemoryBufferRef Buffer,
+                                    TargetOptions options, std::string &errMsg,
+                                    LLVMContext *Context) {
+  std::unique_ptr<LLVMContext> OwnedContext;
+  if (!Context) {
+    OwnedContext = llvm::make_unique<LLVMContext>();
+    Context = OwnedContext.get();
+  }
+
+  ErrorOr<MemoryBufferRef> MBOrErr =
+      IRObjectFile::findBitcodeInMemBuffer(Buffer);
+  if (std::error_code EC = MBOrErr.getError()) {
+    errMsg = EC.message();
+    return nullptr;
+  }
+  ErrorOr<Module *> MOrErr = parseBitcodeFile(*MBOrErr, *Context);
   if (std::error_code EC = MOrErr.getError()) {
     errMsg = EC.message();
     return nullptr;
@@ -144,13 +195,16 @@ LTOModule *LTOModule::makeLTOModule(std::unique_ptr<MemoryBuffer> Buffer,
 
   TargetMachine *target = march->createTargetMachine(TripleStr, CPU, FeatureStr,
                                                      options);
-  M->materializeAllPermanently(true);
-  M->setDataLayout(target->getDataLayout());
+  M->setDataLayout(target->getSubtargetImpl()->getDataLayout());
 
   std::unique_ptr<object::IRObjectFile> IRObj(
-      new object::IRObjectFile(std::move(Buffer), std::move(M)));
+      new object::IRObjectFile(Buffer, std::move(M)));
 
-  LTOModule *Ret = new LTOModule(std::move(IRObj), target);
+  LTOModule *Ret;
+  if (OwnedContext)
+    Ret = new LTOModule(std::move(IRObj), target, std::move(OwnedContext));
+  else
+    Ret = new LTOModule(std::move(IRObj), target);
 
   if (Ret->parseSymbols(errMsg)) {
     delete Ret;
@@ -163,8 +217,8 @@ LTOModule *LTOModule::makeLTOModule(std::unique_ptr<MemoryBuffer> Buffer,
 }
 
 /// Create a MemoryBuffer from a memory range with an optional name.
-MemoryBuffer *LTOModule::makeBuffer(const void *mem, size_t length,
-                                    StringRef name) {
+std::unique_ptr<MemoryBuffer>
+LTOModule::makeBuffer(const void *mem, size_t length, StringRef name) {
   const char *startPtr = (const char*)mem;
   return MemoryBuffer::getMemBuffer(StringRef(startPtr, length), name, false);
 }
@@ -347,30 +401,6 @@ void LTOModule::addDefinedFunctionSymbol(const char *Name, const Function *F) {
   addDefinedSymbol(Name, F, true);
 }
 
-static bool canBeHidden(const GlobalValue *GV) {
-  // FIXME: this is duplicated with another static function in AsmPrinter.cpp
-  GlobalValue::LinkageTypes L = GV->getLinkage();
-
-  if (L != GlobalValue::LinkOnceODRLinkage)
-    return false;
-
-  if (GV->hasUnnamedAddr())
-    return true;
-
-  // If it is a non constant variable, it needs to be uniqued across shared
-  // objects.
-  if (const GlobalVariable *Var = dyn_cast<GlobalVariable>(GV)) {
-    if (!Var->isConstant())
-      return false;
-  }
-
-  GlobalStatus GS;
-  if (GlobalStatus::analyzeGlobal(GV, GS))
-    return false;
-
-  return !GS.IsCompared;
-}
-
 void LTOModule::addDefinedSymbol(const char *Name, const GlobalValue *def,
                                  bool isFunction) {
   // set alignment part log2() can have rounding errors
@@ -404,7 +434,7 @@ void LTOModule::addDefinedSymbol(const char *Name, const GlobalValue *def,
     attr |= LTO_SYMBOL_SCOPE_HIDDEN;
   else if (def->hasProtectedVisibility())
     attr |= LTO_SYMBOL_SCOPE_PROTECTED;
-  else if (canBeHidden(def))
+  else if (canBeOmittedFromSymbolTable(def))
     attr |= LTO_SYMBOL_SCOPE_DEFAULT_CAN_BE_HIDDEN;
   else
     attr |= LTO_SYMBOL_SCOPE_DEFAULT;
@@ -597,8 +627,10 @@ void LTOModule::parseMetadata() {
         MDString *MDOption = cast<MDString>(MDOptions->getOperand(ii));
         StringRef Op = _linkeropt_strings.
             GetOrCreateValue(MDOption->getString()).getKey();
-        StringRef DepLibName = _target->getTargetLowering()->
-            getObjFileLowering().getDepLibFromLinkerOpt(Op);
+        StringRef DepLibName = _target->getSubtargetImpl()
+                                   ->getTargetLowering()
+                                   ->getObjFileLowering()
+                                   .getDepLibFromLinkerOpt(Op);
         if (!DepLibName.empty())
           _deplibs.push_back(DepLibName.data());
         else if (!Op.empty())

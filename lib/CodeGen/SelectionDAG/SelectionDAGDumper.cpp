@@ -27,6 +27,7 @@
 #include "llvm/Target/TargetIntrinsicInfo.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetRegisterInfo.h"
+#include "llvm/Target/TargetSubtargetInfo.h"
 using namespace llvm;
 
 std::string SDNode::getOperationName(const SelectionDAG *G) const {
@@ -36,7 +37,7 @@ std::string SDNode::getOperationName(const SelectionDAG *G) const {
       return "<<Unknown DAG Node>>";
     if (isMachineOpcode()) {
       if (G)
-        if (const TargetInstrInfo *TII = G->getTarget().getInstrInfo())
+        if (const TargetInstrInfo *TII = G->getSubtarget().getInstrInfo())
           if (getMachineOpcode() < TII->getNumOpcodes())
             return TII->getName(getMachineOpcode());
       return "<<Unknown Machine Node #" + utostr(getOpcode()) + ">>";
@@ -140,6 +141,8 @@ std::string SDNode::getOperationName(const SelectionDAG *G) const {
 
   // Unary operators
   case ISD::FABS:                       return "fabs";
+  case ISD::FMINNUM:                    return "fminnum";
+  case ISD::FMAXNUM:                    return "fmaxnum";
   case ISD::FNEG:                       return "fneg";
   case ISD::FSQRT:                      return "fsqrt";
   case ISD::FSIN:                       return "fsin";
@@ -433,7 +436,8 @@ void SDNode::print_details(raw_ostream &OS, const SelectionDAG *G) const {
       OS << LBB->getName() << " ";
     OS << (const void*)BBDN->getBasicBlock() << ">";
   } else if (const RegisterSDNode *R = dyn_cast<RegisterSDNode>(this)) {
-    OS << ' ' << PrintReg(R->getReg(), G ? G->getTarget().getRegisterInfo() :nullptr);
+    OS << ' ' << PrintReg(R->getReg(),
+                          G ? G->getSubtarget().getRegisterInfo() : nullptr);
   } else if (const ExternalSymbolSDNode *ES =
              dyn_cast<ExternalSymbolSDNode>(this)) {
     OS << "'" << ES->getSymbol() << "'";

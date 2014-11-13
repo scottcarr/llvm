@@ -69,8 +69,10 @@ void DAGTypeLegalizer::ScalarizeVectorResult(SDNode *N, unsigned ResNo) {
   case ISD::ANY_EXTEND:
   case ISD::BSWAP:
   case ISD::CTLZ:
+  case ISD::CTLZ_ZERO_UNDEF:
   case ISD::CTPOP:
   case ISD::CTTZ:
+  case ISD::CTTZ_ZERO_UNDEF:
   case ISD::FABS:
   case ISD::FCEIL:
   case ISD::FCOS:
@@ -104,6 +106,9 @@ void DAGTypeLegalizer::ScalarizeVectorResult(SDNode *N, unsigned ResNo) {
   case ISD::FCOPYSIGN:
   case ISD::FDIV:
   case ISD::FMUL:
+  case ISD::FMINNUM:
+  case ISD::FMAXNUM:
+
   case ISD::FPOW:
   case ISD::FREM:
   case ISD::FSUB:
@@ -232,7 +237,23 @@ SDValue DAGTypeLegalizer::ScalarizeVecRes_LOAD(LoadSDNode *N) {
 SDValue DAGTypeLegalizer::ScalarizeVecRes_UnaryOp(SDNode *N) {
   // Get the dest type - it doesn't always match the input type, e.g. int_to_fp.
   EVT DestVT = N->getValueType(0).getVectorElementType();
-  SDValue Op = GetScalarizedVector(N->getOperand(0));
+  SDValue Op = N->getOperand(0);
+  EVT OpVT = Op.getValueType();
+  SDLoc DL(N);
+  // The result needs scalarizing, but it's not a given that the source does.
+  // This is a workaround for targets where it's impossible to scalarize the
+  // result of a conversion, because the source type is legal.
+  // For instance, this happens on AArch64: v1i1 is illegal but v1i{8,16,32}
+  // are widened to v8i8, v4i16, and v2i32, which is legal, because v1i64 is
+  // legal and was not scalarized.
+  // See the similar logic in ScalarizeVecRes_VSETCC
+  if (getTypeAction(OpVT) == TargetLowering::TypeScalarizeVector) {
+    Op = GetScalarizedVector(Op);
+  } else {
+    EVT VT = OpVT.getVectorElementType();
+    Op = DAG.getNode(ISD::EXTRACT_VECTOR_ELT, DL, VT, Op,
+                      DAG.getConstant(0, TLI.getVectorIdxTy()));
+  }
   return DAG.getNode(N->getOpcode(), SDLoc(N), DestVT, Op);
 }
 
@@ -406,6 +427,10 @@ bool DAGTypeLegalizer::ScalarizeVectorOperand(SDNode *N, unsigned OpNo) {
     case ISD::ZERO_EXTEND:
     case ISD::SIGN_EXTEND:
     case ISD::TRUNCATE:
+    case ISD::FP_TO_SINT:
+    case ISD::FP_TO_UINT:
+    case ISD::SINT_TO_FP:
+    case ISD::UINT_TO_FP:
       Res = ScalarizeVecOp_UnaryOp(N);
       break;
     case ISD::CONCAT_VECTORS:
@@ -449,11 +474,11 @@ SDValue DAGTypeLegalizer::ScalarizeVecOp_BITCAST(SDNode *N) {
                      N->getValueType(0), Elt);
 }
 
-/// ScalarizeVecOp_EXTEND - If the value to extend is a vector that needs
-/// to be scalarized, it must be <1 x ty>.  Extend the element instead.
+/// ScalarizeVecOp_UnaryOp - If the input is a vector that needs to be
+/// scalarized, it must be <1 x ty>.  Do the operation on the element instead.
 SDValue DAGTypeLegalizer::ScalarizeVecOp_UnaryOp(SDNode *N) {
   assert(N->getValueType(0).getVectorNumElements() == 1 &&
-         "Unexected vector type!");
+         "Unexpected vector type!");
   SDValue Elt = GetScalarizedVector(N->getOperand(0));
   SDValue Op = DAG.getNode(N->getOpcode(), SDLoc(N),
                            N->getValueType(0).getScalarType(), Elt);
@@ -625,6 +650,8 @@ void DAGTypeLegalizer::SplitVectorResult(SDNode *N, unsigned ResNo) {
   case ISD::FCOPYSIGN:
   case ISD::FSUB:
   case ISD::FMUL:
+  case ISD::FMINNUM:
+  case ISD::FMAXNUM:
   case ISD::SDIV:
   case ISD::UDIV:
   case ISD::FDIV:
@@ -865,6 +892,10 @@ void DAGTypeLegalizer::SplitVecRes_INSERT_VECTOR_ELT(SDNode *N, SDValue &Lo,
                                        TLI.getVectorIdxTy()));
     return;
   }
+
+  // See if the target wants to custom expand this node.
+  if (CustomLowerNode(N, N->getValueType(0), true))
+    return;
 
   // Spill the vector to the stack.
   EVT VecVT = Vec.getValueType();
@@ -1347,6 +1378,10 @@ SDValue DAGTypeLegalizer::SplitVecOp_EXTRACT_VECTOR_ELT(SDNode *N) {
                                                   Idx.getValueType())), 0);
   }
 
+  // See if the target wants to custom expand this node.
+  if (CustomLowerNode(N, N->getValueType(0), true))
+    return SDValue();
+
   // Store the vector to the stack.
   EVT EltVT = VecVT.getVectorElementType();
   SDLoc dl(N);
@@ -1357,7 +1392,7 @@ SDValue DAGTypeLegalizer::SplitVecOp_EXTRACT_VECTOR_ELT(SDNode *N) {
   // Load back the required element.
   StackPtr = GetVectorElementPointer(StackPtr, EltVT, Idx);
   return DAG.getExtLoad(ISD::EXTLOAD, dl, N->getValueType(0), Store, StackPtr,
-                        MachinePointerInfo(), EltVT, false, false, 0);
+                        MachinePointerInfo(), EltVT, false, false, false, 0);
 }
 
 SDValue DAGTypeLegalizer::SplitVecOp_STORE(StoreSDNode *N, unsigned OpNo) {
@@ -1573,6 +1608,8 @@ void DAGTypeLegalizer::WidenVectorResult(SDNode *N, unsigned ResNo) {
   case ISD::OR:
   case ISD::SUB:
   case ISD::XOR:
+  case ISD::FMINNUM:
+  case ISD::FMAXNUM:
     Res = WidenVecRes_Binary(N);
     break;
 
@@ -2887,6 +2924,7 @@ DAGTypeLegalizer::GenWidenVectorExtLoads(SmallVectorImpl<SDValue> &LdChain,
   unsigned  Align    = LD->getAlignment();
   bool      isVolatile = LD->isVolatile();
   bool      isNonTemporal = LD->isNonTemporal();
+  bool      isInvariant = LD->isInvariant();
   AAMDNodes AAInfo = LD->getAAInfo();
 
   EVT EltVT = WidenVT.getVectorElementType();
@@ -2899,7 +2937,8 @@ DAGTypeLegalizer::GenWidenVectorExtLoads(SmallVectorImpl<SDValue> &LdChain,
   unsigned Increment = LdEltVT.getSizeInBits() / 8;
   Ops[0] = DAG.getExtLoad(ExtType, dl, EltVT, Chain, BasePtr,
                           LD->getPointerInfo(),
-                          LdEltVT, isVolatile, isNonTemporal, Align, AAInfo);
+                          LdEltVT, isVolatile, isNonTemporal, isInvariant,
+                          Align, AAInfo);
   LdChain.push_back(Ops[0].getValue(1));
   unsigned i = 0, Offset = Increment;
   for (i=1; i < NumElts; ++i, Offset += Increment) {
@@ -2909,7 +2948,8 @@ DAGTypeLegalizer::GenWidenVectorExtLoads(SmallVectorImpl<SDValue> &LdChain,
                                                      BasePtr.getValueType()));
     Ops[i] = DAG.getExtLoad(ExtType, dl, EltVT, Chain, NewBasePtr,
                             LD->getPointerInfo().getWithOffset(Offset), LdEltVT,
-                            isVolatile, isNonTemporal, Align, AAInfo);
+                            isVolatile, isNonTemporal, isInvariant, Align,
+                            AAInfo);
     LdChain.push_back(Ops[i].getValue(1));
   }
 

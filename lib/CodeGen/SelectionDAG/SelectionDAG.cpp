@@ -46,6 +46,7 @@
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/Target/TargetSelectionDAGInfo.h"
+#include "llvm/Target/TargetSubtargetInfo.h"
 #include <algorithm>
 #include <cmath>
 
@@ -686,6 +687,15 @@ void SelectionDAG::DeleteNodeNotInCSEMaps(SDNode *N) {
   DeallocateNode(N);
 }
 
+void SDDbgInfo::erase(const SDNode *Node) {
+  DbgValMapType::iterator I = DbgValMap.find(Node);
+  if (I == DbgValMap.end())
+    return;
+  for (auto &Val: I->second)
+    Val->setIsInvalidated();
+  DbgValMap.erase(I);
+}
+
 void SelectionDAG::DeallocateNode(SDNode *N) {
   if (N->OperandsNeedDelete)
     delete[] N->OperandList;
@@ -696,10 +706,9 @@ void SelectionDAG::DeallocateNode(SDNode *N) {
 
   NodeAllocator.Deallocate(AllNodes.remove(N));
 
-  // If any of the SDDbgValue nodes refer to this SDNode, invalidate them.
-  ArrayRef<SDDbgValue*> DbgVals = DbgInfo->getSDDbgValues(N);
-  for (unsigned i = 0, e = DbgVals.size(); i != e; ++i)
-    DbgVals[i]->setIsInvalidated();
+  // If any of the SDDbgValue nodes refer to this SDNode, invalidate
+  // them and forget about that node.
+  DbgInfo->erase(N);
 }
 
 #ifndef NDEBUG
@@ -898,22 +907,23 @@ unsigned SelectionDAG::getEVTAlignment(EVT VT) const {
                    PointerType::get(Type::getInt8Ty(*getContext()), 0) :
                    VT.getTypeForEVT(*getContext());
 
-  return TM.getTargetLowering()->getDataLayout()->getABITypeAlignment(Ty);
+  return TLI->getDataLayout()->getABITypeAlignment(Ty);
 }
 
 // EntryNode could meaningfully have debug info if we can find it...
 SelectionDAG::SelectionDAG(const TargetMachine &tm, CodeGenOpt::Level OL)
-  : TM(tm), TSI(*tm.getSelectionDAGInfo()), TLI(nullptr), OptLevel(OL),
-    EntryNode(ISD::EntryToken, 0, DebugLoc(), getVTList(MVT::Other)),
-    Root(getEntryNode()), NewNodesMustHaveLegalTypes(false),
-    UpdateListeners(nullptr) {
+    : TM(tm), TSI(nullptr), TLI(nullptr), OptLevel(OL),
+      EntryNode(ISD::EntryToken, 0, DebugLoc(), getVTList(MVT::Other)),
+      Root(getEntryNode()), NewNodesMustHaveLegalTypes(false),
+      UpdateListeners(nullptr) {
   AllNodes.push_back(&EntryNode);
   DbgInfo = new SDDbgInfo();
 }
 
-void SelectionDAG::init(MachineFunction &mf, const TargetLowering *tli) {
+void SelectionDAG::init(MachineFunction &mf) {
   MF = &mf;
-  TLI = tli;
+  TLI = getSubtarget().getTargetLowering();
+  TSI = getSubtarget().getSelectionDAGInfo();
   Context = &mf.getFunction()->getContext();
 }
 
@@ -1082,8 +1092,6 @@ SDValue SelectionDAG::getConstant(const ConstantInt &Val, EVT VT, bool isT,
   EVT EltVT = VT.getScalarType();
   const ConstantInt *Elt = &Val;
 
-  const TargetLowering *TLI = TM.getTargetLowering();
-
   // In some cases the vector type is legal but the element type is illegal and
   // needs to be promoted, for example v8i8 on ARM.  In this case, promote the
   // inserted value (the type does not need to match the vector element type).
@@ -1172,7 +1180,7 @@ SDValue SelectionDAG::getConstant(const ConstantInt &Val, EVT VT, bool isT,
 }
 
 SDValue SelectionDAG::getIntPtrConstant(uint64_t Val, bool isTarget) {
-  return getConstant(Val, TM.getTargetLowering()->getPointerTy(), isTarget);
+  return getConstant(Val, TLI->getPointerTy(), isTarget);
 }
 
 
@@ -1237,7 +1245,6 @@ SDValue SelectionDAG::getGlobalAddress(const GlobalValue *GV, SDLoc DL,
                                        unsigned char TargetFlags) {
   assert((TargetFlags == 0 || isTargetGA) &&
          "Cannot set target flags on target-independent globals");
-  const TargetLowering *TLI = TM.getTargetLowering();
 
   // Truncate (with sign-extension) the offset value to the pointer size.
   unsigned BitWidth = TLI->getPointerTypeSizeInBits(GV->getType());
@@ -1310,8 +1317,7 @@ SDValue SelectionDAG::getConstantPool(const Constant *C, EVT VT,
   assert((TargetFlags == 0 || isTarget) &&
          "Cannot set target flags on target-independent globals");
   if (Alignment == 0)
-    Alignment =
-    TM.getTargetLowering()->getDataLayout()->getPrefTypeAlignment(C->getType());
+    Alignment = TLI->getDataLayout()->getPrefTypeAlignment(C->getType());
   unsigned Opc = isTarget ? ISD::TargetConstantPool : ISD::ConstantPool;
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, Opc, getVTList(VT), None);
@@ -1338,8 +1344,7 @@ SDValue SelectionDAG::getConstantPool(MachineConstantPoolValue *C, EVT VT,
   assert((TargetFlags == 0 || isTarget) &&
          "Cannot set target flags on target-independent globals");
   if (Alignment == 0)
-    Alignment =
-    TM.getTargetLowering()->getDataLayout()->getPrefTypeAlignment(C->getType());
+    Alignment = TLI->getDataLayout()->getPrefTypeAlignment(C->getType());
   unsigned Opc = isTarget ? ISD::TargetConstantPool : ISD::ConstantPool;
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, Opc, getVTList(VT), None);
@@ -1744,7 +1749,7 @@ SDValue SelectionDAG::getAddrSpaceCast(SDLoc dl, EVT VT, SDValue Ptr,
 /// the target's desired shift amount type.
 SDValue SelectionDAG::getShiftAmountOperand(EVT LHSTy, SDValue Op) {
   EVT OpTy = Op.getValueType();
-  EVT ShTy = TM.getTargetLowering()->getShiftAmountTy(LHSTy);
+  EVT ShTy = TLI->getShiftAmountTy(LHSTy);
   if (OpTy == ShTy || OpTy.isVector()) return Op;
 
   ISD::NodeType Opcode = OpTy.bitsGT(ShTy) ?  ISD::TRUNCATE : ISD::ZERO_EXTEND;
@@ -1757,7 +1762,6 @@ SDValue SelectionDAG::CreateStackTemporary(EVT VT, unsigned minAlign) {
   MachineFrameInfo *FrameInfo = getMachineFunction().getFrameInfo();
   unsigned ByteSize = VT.getStoreSize();
   Type *Ty = VT.getTypeForEVT(*getContext());
-  const TargetLowering *TLI = TM.getTargetLowering();
   unsigned StackAlign =
   std::max((unsigned)TLI->getDataLayout()->getPrefTypeAlignment(Ty), minAlign);
 
@@ -1772,7 +1776,6 @@ SDValue SelectionDAG::CreateStackTemporary(EVT VT1, EVT VT2) {
                             VT2.getStoreSizeInBits())/8;
   Type *Ty1 = VT1.getTypeForEVT(*getContext());
   Type *Ty2 = VT2.getTypeForEVT(*getContext());
-  const TargetLowering *TLI = TM.getTargetLowering();
   const DataLayout *TD = TLI->getDataLayout();
   unsigned Align = std::max(TD->getPrefTypeAlignment(Ty1),
                             TD->getPrefTypeAlignment(Ty2));
@@ -1791,7 +1794,6 @@ SDValue SelectionDAG::FoldSetCC(EVT VT, SDValue N1,
   case ISD::SETFALSE2: return getConstant(0, VT);
   case ISD::SETTRUE:
   case ISD::SETTRUE2: {
-    const TargetLowering *TLI = TM.getTargetLowering();
     TargetLowering::BooleanContent Cnt =
         TLI->getBooleanContents(N1->getValueType(0));
     return getConstant(
@@ -1880,7 +1882,7 @@ SDValue SelectionDAG::FoldSetCC(EVT VT, SDValue N1,
       // Ensure that the constant occurs on the RHS.
       ISD::CondCode SwappedCond = ISD::getSetCCSwappedOperands(Cond);
       MVT CompVT = N1.getValueType().getSimpleVT();
-      if (!TM.getTargetLowering()->isCondCodeLegal(SwappedCond, CompVT))
+      if (!TLI->isCondCodeLegal(SwappedCond, CompVT))
         return SDValue();
 
       return getSetCC(dl, VT, N2, N1, SwappedCond);
@@ -1916,7 +1918,6 @@ bool SelectionDAG::MaskedValueIsZero(SDValue Op, const APInt &Mask,
 /// them in the KnownZero/KnownOne bitsets.
 void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
                                     APInt &KnownOne, unsigned Depth) const {
-  const TargetLowering *TLI = TM.getTargetLowering();
   unsigned BitWidth = Op.getValueType().getScalarType().getSizeInBits();
 
   KnownZero = KnownOne = APInt(BitWidth, 0);   // Don't know anything.
@@ -2352,7 +2353,6 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
 /// information.  For example, immediately after an "SRA X, 2", we know that
 /// the top 3 bits are all equal to each other, so we return 3.
 unsigned SelectionDAG::ComputeNumSignBits(SDValue Op, unsigned Depth) const{
-  const TargetLowering *TLI = TM.getTargetLowering();
   EVT VT = Op.getValueType();
   assert(VT.isInteger() && "Invalid VT!");
   unsigned VTBits = VT.getScalarType().getSizeInBits();
@@ -2745,7 +2745,7 @@ SDValue SelectionDAG::getNode(unsigned Opcode, SDLoc DL,
     case ISD::FP_TO_UINT: {
       integerPart x[2];
       bool ignored;
-      assert(integerPartWidth >= 64);
+      static_assert(integerPartWidth >= 64, "APFloat parts too small!");
       // FIXME need to be more flexible about rounding mode.
       APFloat::opStatus s = V.convertToInteger(x, VT.getSizeInBits(),
                             Opcode==ISD::FP_TO_SINT,
@@ -3389,6 +3389,7 @@ SDValue SelectionDAG::getNode(unsigned Opcode, SDLoc DL, EVT VT, SDValue N1,
   }
 
   // Constant fold FP operations.
+  bool HasFPExceptions = TLI->hasFloatingPointExceptions();
   ConstantFPSDNode *N1CFP = dyn_cast<ConstantFPSDNode>(N1.getNode());
   ConstantFPSDNode *N2CFP = dyn_cast<ConstantFPSDNode>(N2.getNode());
   if (N1CFP) {
@@ -3402,28 +3403,32 @@ SDValue SelectionDAG::getNode(unsigned Opcode, SDLoc DL, EVT VT, SDValue N1,
       switch (Opcode) {
       case ISD::FADD:
         s = V1.add(V2, APFloat::rmNearestTiesToEven);
-        if (s != APFloat::opInvalidOp)
+        if (!HasFPExceptions || s != APFloat::opInvalidOp)
           return getConstantFP(V1, VT);
         break;
       case ISD::FSUB:
         s = V1.subtract(V2, APFloat::rmNearestTiesToEven);
-        if (s!=APFloat::opInvalidOp)
+        if (!HasFPExceptions || s!=APFloat::opInvalidOp)
           return getConstantFP(V1, VT);
         break;
       case ISD::FMUL:
         s = V1.multiply(V2, APFloat::rmNearestTiesToEven);
-        if (s!=APFloat::opInvalidOp)
+        if (!HasFPExceptions || s!=APFloat::opInvalidOp)
           return getConstantFP(V1, VT);
         break;
       case ISD::FDIV:
         s = V1.divide(V2, APFloat::rmNearestTiesToEven);
-        if (s!=APFloat::opInvalidOp && s!=APFloat::opDivByZero)
+        if (!HasFPExceptions || (s!=APFloat::opInvalidOp &&
+                                 s!=APFloat::opDivByZero)) {
           return getConstantFP(V1, VT);
+        }
         break;
       case ISD::FREM :
         s = V1.mod(V2, APFloat::rmNearestTiesToEven);
-        if (s!=APFloat::opInvalidOp && s!=APFloat::opDivByZero)
+        if (!HasFPExceptions || (s!=APFloat::opInvalidOp &&
+                                 s!=APFloat::opDivByZero)) {
           return getConstantFP(V1, VT);
+        }
         break;
       case ISD::FCOPYSIGN:
         V1.copySign(V2);
@@ -3934,7 +3939,7 @@ static SDValue getMemcpyLoadsAndStores(SelectionDAG &DAG, SDLoc dl,
 
     // Don't promote to an alignment that would require dynamic stack
     // realignment.
-    const TargetRegisterInfo *TRI = MF.getTarget().getRegisterInfo();
+    const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
     if (!TRI->needsStackRealignment(MF))
        while (NewAlign > Align &&
              TLI.getDataLayout()->exceedsNaturalStackAlignment(NewAlign))
@@ -3990,7 +3995,7 @@ static SDValue getMemcpyLoadsAndStores(SelectionDAG &DAG, SDLoc dl,
       Value = DAG.getExtLoad(ISD::EXTLOAD, dl, NVT, Chain,
                              getMemBasePlusOffset(Src, SrcOff, dl, DAG),
                              SrcPtrInfo.getWithOffset(SrcOff), VT, isVol, false,
-                             MinAlign(SrcAlign, SrcOff));
+                             false, MinAlign(SrcAlign, SrcOff));
       Store = DAG.getTruncStore(Chain, dl, Value,
                                 getMemBasePlusOffset(Dst, DstOff, dl, DAG),
                                 DstPtrInfo.getWithOffset(DstOff), VT, isVol,
@@ -4210,9 +4215,8 @@ SDValue SelectionDAG::getMemcpy(SDValue Chain, SDLoc dl, SDValue Dst,
   // Then check to see if we should lower the memcpy with target-specific
   // code. If the target chooses to do this, this is the next best.
   SDValue Result =
-    TSI.EmitTargetCodeForMemcpy(*this, dl, Chain, Dst, Src, Size, Align,
-                                isVol, AlwaysInline,
-                                DstPtrInfo, SrcPtrInfo);
+      TSI->EmitTargetCodeForMemcpy(*this, dl, Chain, Dst, Src, Size, Align,
+                                   isVol, AlwaysInline, DstPtrInfo, SrcPtrInfo);
   if (Result.getNode())
     return Result;
 
@@ -4230,8 +4234,6 @@ SDValue SelectionDAG::getMemcpy(SDValue Chain, SDLoc dl, SDValue Dst,
   // respect volatile, so they may do things like read or write memory
   // beyond the given memory regions. But fixing this isn't easy, and most
   // people don't care.
-
-  const TargetLowering *TLI = TM.getTargetLowering();
 
   // Emit a library call.
   TargetLowering::ArgListTy Args;
@@ -4278,16 +4280,13 @@ SDValue SelectionDAG::getMemmove(SDValue Chain, SDLoc dl, SDValue Dst,
 
   // Then check to see if we should lower the memmove with target-specific
   // code. If the target chooses to do this, this is the next best.
-  SDValue Result =
-    TSI.EmitTargetCodeForMemmove(*this, dl, Chain, Dst, Src, Size, Align, isVol,
-                                 DstPtrInfo, SrcPtrInfo);
+  SDValue Result = TSI->EmitTargetCodeForMemmove(
+      *this, dl, Chain, Dst, Src, Size, Align, isVol, DstPtrInfo, SrcPtrInfo);
   if (Result.getNode())
     return Result;
 
   // FIXME: If the memmove is volatile, lowering it to plain libc memmove may
   // not be safe.  See memcpy above for more details.
-
-  const TargetLowering *TLI = TM.getTargetLowering();
 
   // Emit a library call.
   TargetLowering::ArgListTy Args;
@@ -4333,31 +4332,22 @@ SDValue SelectionDAG::getMemset(SDValue Chain, SDLoc dl, SDValue Dst,
 
   // Then check to see if we should lower the memset with target-specific
   // code. If the target chooses to do this, this is the next best.
-  SDValue Result =
-    TSI.EmitTargetCodeForMemset(*this, dl, Chain, Dst, Src, Size, Align, isVol,
-                                DstPtrInfo);
+  SDValue Result = TSI->EmitTargetCodeForMemset(*this, dl, Chain, Dst, Src,
+                                                Size, Align, isVol, DstPtrInfo);
   if (Result.getNode())
     return Result;
 
   // Emit a library call.
-  const TargetLowering *TLI = TM.getTargetLowering();
   Type *IntPtrTy = TLI->getDataLayout()->getIntPtrType(*getContext());
   TargetLowering::ArgListTy Args;
   TargetLowering::ArgListEntry Entry;
   Entry.Node = Dst; Entry.Ty = IntPtrTy;
   Args.push_back(Entry);
-  // Extend or truncate the argument to be an i32 value for the call.
-  if (Src.getValueType().bitsGT(MVT::i32))
-    Src = getNode(ISD::TRUNCATE, dl, MVT::i32, Src);
-  else
-    Src = getNode(ISD::ZERO_EXTEND, dl, MVT::i32, Src);
   Entry.Node = Src;
-  Entry.Ty = Type::getInt32Ty(*getContext());
-  Entry.isSExt = true;
+  Entry.Ty = Src.getValueType().getTypeForEVT(*getContext());
   Args.push_back(Entry);
   Entry.Node = Size;
   Entry.Ty = IntPtrTy;
-  Entry.isSExt = false;
   Args.push_back(Entry);
 
   // FIXME: pass in SDLoc
@@ -4549,7 +4539,7 @@ SelectionDAG::getMemIntrinsicNode(unsigned Opcode, SDLoc dl, SDVTList VTList,
                                   ArrayRef<SDValue> Ops,
                                   EVT MemVT, MachinePointerInfo PtrInfo,
                                   unsigned Align, bool Vol,
-                                  bool ReadMem, bool WriteMem) {
+                                  bool ReadMem, bool WriteMem, unsigned Size) {
   if (Align == 0)  // Ensure that codegen never sees alignment 0
     Align = getEVTAlignment(MemVT);
 
@@ -4561,8 +4551,10 @@ SelectionDAG::getMemIntrinsicNode(unsigned Opcode, SDLoc dl, SDVTList VTList,
     Flags |= MachineMemOperand::MOLoad;
   if (Vol)
     Flags |= MachineMemOperand::MOVolatile;
+  if (!Size)
+    Size = MemVT.getStoreSize();
   MachineMemOperand *MMO =
-    MF.getMachineMemOperand(PtrInfo, Flags, MemVT.getStoreSize(), Align);
+    MF.getMachineMemOperand(PtrInfo, Flags, Size, Align);
 
   return getMemIntrinsicNode(Opcode, dl, VTList, Ops, MemVT, MMO);
 }
@@ -4746,11 +4738,12 @@ SDValue SelectionDAG::getExtLoad(ISD::LoadExtType ExtType, SDLoc dl, EVT VT,
                                  SDValue Chain, SDValue Ptr,
                                  MachinePointerInfo PtrInfo, EVT MemVT,
                                  bool isVolatile, bool isNonTemporal,
-                                 unsigned Alignment, const AAMDNodes &AAInfo) {
+                                 bool isInvariant, unsigned Alignment,
+                                 const AAMDNodes &AAInfo) {
   SDValue Undef = getUNDEF(Ptr.getValueType());
   return getLoad(ISD::UNINDEXED, ExtType, VT, dl, Chain, Ptr, Undef,
-                 PtrInfo, MemVT, isVolatile, isNonTemporal, false, Alignment,
-                 AAInfo);
+                 PtrInfo, MemVT, isVolatile, isNonTemporal, isInvariant,
+                 Alignment, AAInfo);
 }
 
 
@@ -5084,7 +5077,7 @@ SDValue SelectionDAG::getNode(unsigned Opcode, SDLoc DL, SDVTList VTList,
 }
 
 SDValue SelectionDAG::getNode(unsigned Opcode, SDLoc DL, SDVTList VTList) {
-  return getNode(Opcode, DL, VTList, ArrayRef<SDValue>());
+  return getNode(Opcode, DL, VTList, None);
 }
 
 SDValue SelectionDAG::getNode(unsigned Opcode, SDLoc DL, SDVTList VTList,
@@ -5466,6 +5459,10 @@ SDNode *SelectionDAG::UpdadeSDLocOnMergedSDNode(SDNode *N, SDLoc OLoc) {
 /// node, and because it doesn't require CSE recalculation for any of
 /// the node's users.
 ///
+/// However, note that MorphNodeTo recursively deletes dead nodes from the DAG.
+/// As a consequence it isn't appropriate to use from within the DAG combiner or
+/// the legalizer which maintain worklists that would need to be updated when
+/// deleting things.
 SDNode *SelectionDAG::MorphNodeTo(SDNode *N, unsigned Opc,
                                   SDVTList VTs, ArrayRef<SDValue> Ops) {
   unsigned NumOps = Ops.size();
@@ -5532,10 +5529,9 @@ SDNode *SelectionDAG::MorphNodeTo(SDNode *N, unsigned Opc,
   // new operands.
   if (!DeadNodeSet.empty()) {
     SmallVector<SDNode *, 16> DeadNodes;
-    for (SmallPtrSet<SDNode *, 16>::iterator I = DeadNodeSet.begin(),
-         E = DeadNodeSet.end(); I != E; ++I)
-      if ((*I)->use_empty())
-        DeadNodes.push_back(*I);
+    for (SDNode *N : DeadNodeSet)
+      if (N->use_empty())
+        DeadNodes.push_back(N);
     RemoveDeadNodes(DeadNodes);
   }
 
@@ -5750,26 +5746,24 @@ SDNode *SelectionDAG::getNodeIfExists(unsigned Opcode, SDVTList VTList,
 /// getDbgValue - Creates a SDDbgValue node.
 ///
 /// SDNode
-SDDbgValue *
-SelectionDAG::getDbgValue(MDNode *MDPtr, SDNode *N, unsigned R,
-			  bool IsIndirect, uint64_t Off,
-                          DebugLoc DL, unsigned O) {
-  return new (Allocator) SDDbgValue(MDPtr, N, R, IsIndirect, Off, DL, O);
+SDDbgValue *SelectionDAG::getDbgValue(MDNode *Var, MDNode *Expr, SDNode *N,
+                                      unsigned R, bool IsIndirect, uint64_t Off,
+                                      DebugLoc DL, unsigned O) {
+  return new (Allocator) SDDbgValue(Var, Expr, N, R, IsIndirect, Off, DL, O);
 }
 
 /// Constant
-SDDbgValue *
-SelectionDAG::getConstantDbgValue(MDNode *MDPtr, const Value *C,
-				  uint64_t Off,
-				  DebugLoc DL, unsigned O) {
-  return new (Allocator) SDDbgValue(MDPtr, C, Off, DL, O);
+SDDbgValue *SelectionDAG::getConstantDbgValue(MDNode *Var, MDNode *Expr,
+                                              const Value *C, uint64_t Off,
+                                              DebugLoc DL, unsigned O) {
+  return new (Allocator) SDDbgValue(Var, Expr, C, Off, DL, O);
 }
 
 /// FrameIndex
-SDDbgValue *
-SelectionDAG::getFrameIndexDbgValue(MDNode *MDPtr, unsigned FI, uint64_t Off,
-				    DebugLoc DL, unsigned O) {
-  return new (Allocator) SDDbgValue(MDPtr, FI, Off, DL, O);
+SDDbgValue *SelectionDAG::getFrameIndexDbgValue(MDNode *Var, MDNode *Expr,
+                                                unsigned FI, uint64_t Off,
+                                                DebugLoc DL, unsigned O) {
+  return new (Allocator) SDDbgValue(Var, Expr, FI, Off, DL, O);
 }
 
 namespace {
@@ -6158,9 +6152,11 @@ unsigned SelectionDAG::AssignTopologicalOrder() {
 /// AddDbgValue - Add a dbg_value SDNode. If SD is non-null that means the
 /// value is produced by SD.
 void SelectionDAG::AddDbgValue(SDDbgValue *DB, SDNode *SD, bool isParameter) {
-  DbgInfo->add(DB, SD, isParameter);
-  if (SD)
+  if (SD) {
+    assert(DbgInfo->getSDDbgValues(SD).empty() || SD->getHasDebugValue());
     SD->setHasDebugValue(true);
+  }
+  DbgInfo->add(DB, SD, isParameter);
 }
 
 /// TransferDbgValues - Transfer SDDbgValues.
@@ -6175,10 +6171,10 @@ void SelectionDAG::TransferDbgValues(SDValue From, SDValue To) {
        I != E; ++I) {
     SDDbgValue *Dbg = *I;
     if (Dbg->getKind() == SDDbgValue::SDNODE) {
-      SDDbgValue *Clone = getDbgValue(Dbg->getMDPtr(), ToNode, To.getResNo(),
-				      Dbg->isIndirect(),
-                                      Dbg->getOffset(), Dbg->getDebugLoc(),
-                                      Dbg->getOrder());
+      SDDbgValue *Clone =
+          getDbgValue(Dbg->getVariable(), Dbg->getExpression(), ToNode,
+                      To.getResNo(), Dbg->isIndirect(), Dbg->getOffset(),
+                      Dbg->getDebugLoc(), Dbg->getOrder());
       ClonedDVs.push_back(Clone);
     }
   }
@@ -6216,7 +6212,10 @@ MemSDNode::MemSDNode(unsigned Opc, unsigned Order, DebugLoc dl, SDVTList VTs,
   assert(isVolatile() == MMO->isVolatile() && "Volatile encoding error!");
   assert(isNonTemporal() == MMO->isNonTemporal() &&
          "Non-temporal encoding error!");
-  assert(memvt.getStoreSize() == MMO->getSize() && "Size mismatch!");
+  // We check here that the size of the memory operand fits within the size of
+  // the MMO. This is because the MMO might indicate only a possible address
+  // range instead of specifying the affected memory addresses precisely.
+  assert(memvt.getStoreSize() <= MMO->getSize() && "Size mismatch!");
 }
 
 MemSDNode::MemSDNode(unsigned Opc, unsigned Order, DebugLoc dl, SDVTList VTs,
@@ -6226,7 +6225,7 @@ MemSDNode::MemSDNode(unsigned Opc, unsigned Order, DebugLoc dl, SDVTList VTs,
   SubclassData = encodeMemSDNodeFlags(0, ISD::UNINDEXED, MMO->isVolatile(),
                                       MMO->isNonTemporal(), MMO->isInvariant());
   assert(isVolatile() == MMO->isVolatile() && "Volatile encoding error!");
-  assert(memvt.getStoreSize() == MMO->getSize() && "Size mismatch!");
+  assert(memvt.getStoreSize() <= MMO->getSize() && "Size mismatch!");
 }
 
 /// Profile - Gather unique data for the node.
@@ -6370,7 +6369,7 @@ bool SDNode::hasPredecessor(const SDNode *N) const {
 
 bool
 SDNode::hasPredecessorHelper(const SDNode *N,
-                             SmallPtrSet<const SDNode *, 32> &Visited,
+                             SmallPtrSetImpl<const SDNode *> &Visited,
                              SmallVectorImpl<const SDNode *> &Worklist) const {
   if (Visited.empty()) {
     Worklist.push_back(this);
@@ -6426,7 +6425,6 @@ SDValue SelectionDAG::UnrollVectorOp(SDNode *N, unsigned ResNE) {
       EVT OperandVT = Operand.getValueType();
       if (OperandVT.isVector()) {
         // A vector operand; extract a single element.
-        const TargetLowering *TLI = TM.getTargetLowering();
         EVT OperandEltVT = OperandVT.getVectorElementType();
         Operands[j] = getNode(ISD::EXTRACT_VECTOR_ELT, dl,
                               OperandEltVT,
@@ -6506,7 +6504,6 @@ bool SelectionDAG::isConsecutiveLoad(LoadSDNode *LD, LoadSDNode *Base,
   const GlobalValue *GV2 = nullptr;
   int64_t Offset1 = 0;
   int64_t Offset2 = 0;
-  const TargetLowering *TLI = TM.getTargetLowering();
   bool isGA1 = TLI->isGAPlusOffset(Loc.getNode(), GV1, Offset1);
   bool isGA2 = TLI->isGAPlusOffset(BaseLoc.getNode(), GV2, Offset2);
   if (isGA1 && isGA2 && GV1 == GV2)
@@ -6521,7 +6518,6 @@ unsigned SelectionDAG::InferPtrAlignment(SDValue Ptr) const {
   // If this is a GlobalAddress + cst, return the alignment.
   const GlobalValue *GV;
   int64_t GVOffset = 0;
-  const TargetLowering *TLI = TM.getTargetLowering();
   if (TLI->isGAPlusOffset(Ptr.getNode(), GV, GVOffset)) {
     unsigned PtrWidth = TLI->getPointerTypeSizeInBits(GV->getType());
     APInt KnownZero(PtrWidth, 0), KnownOne(PtrWidth, 0);
@@ -6748,8 +6744,8 @@ bool ShuffleVectorSDNode::isSplatMask(const int *Mask, EVT VT) {
 
 #ifndef NDEBUG
 static void checkForCyclesHelper(const SDNode *N,
-                                 SmallPtrSet<const SDNode*, 32> &Visited,
-                                 SmallPtrSet<const SDNode*, 32> &Checked,
+                                 SmallPtrSetImpl<const SDNode*> &Visited,
+                                 SmallPtrSetImpl<const SDNode*> &Checked,
                                  const llvm::SelectionDAG *DAG) {
   // If this node has already been checked, don't check it again.
   if (Checked.count(N))

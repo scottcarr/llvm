@@ -75,11 +75,12 @@ identifiers, for different purposes:
 #. Named values are represented as a string of characters with their
    prefix. For example, ``%foo``, ``@DivisionByZero``,
    ``%a.really.long.identifier``. The actual regular expression used is
-   '``[%@][a-zA-Z$._][a-zA-Z$._0-9]*``'. Identifiers which require other
+   '``[%@][a-zA-Z$._][a-zA-Z$._0-9]*``'. Identifiers that require other
    characters in their names can be surrounded with quotes. Special
    characters may be escaped using ``"\xx"`` where ``xx`` is the ASCII
    code for the character in hexadecimal. In this way, any character can
-   be used in a name value, even quotes themselves.
+   be used in a name value, even quotes themselves. The ``"\01"`` prefix
+   can be used on global variables to suppress mangling.
 #. Unnamed values are represented as an unsigned numeric value with
    their prefix. For example, ``%12``, ``@2``, ``%44``.
 #. Constants, which are described in the section  Constants_ below.
@@ -128,9 +129,10 @@ lexical features of LLVM:
 #. Unnamed temporaries are created when the result of a computation is
    not assigned to a named value.
 #. Unnamed temporaries are numbered sequentially (using a per-function
-   incrementing counter, starting with 0). Note that basic blocks are
-   included in this numbering. For example, if the entry basic block is not
-   given a label name, then it will get number 0.
+   incrementing counter, starting with 0). Note that basic blocks and unnamed
+   function parameters are included in this numbering. For example, if the
+   entry basic block is not given a label name and all function parameters are
+   named, then it will get number 0.
 
 It also shows a convention that we follow in this document. When
 demonstrating instructions, we will follow an instruction with a comment
@@ -168,8 +170,8 @@ symbol table entries. Here is an example of the "hello world" module:
     }
 
     ; Named metadata
-    !1 = metadata !{i32 42}
-    !foo = !{!1, null}
+    !0 = metadata !{i32 42, null, metadata !"string"}
+    !foo = !{!0}
 
 This example is made up of a :ref:`global variable <globalvars>` named
 "``.str``", an external declaration of the "``puts``" function, a
@@ -500,7 +502,7 @@ Structure Types
 LLVM IR allows you to specify both "identified" and "literal" :ref:`structure
 types <t_struct>`.  Literal types are uniqued structurally, but identified types
 are never uniqued.  An :ref:`opaque structural type <t_opaque>` can also be used
-to forward declare a type which is not yet available.
+to forward declare a type that is not yet available.
 
 An example of a identified structure specification is:
 
@@ -680,6 +682,14 @@ Syntax::
            [unnamed_addr] [fn Attrs] [section "name"] [comdat $<ComdatName>]
            [align N] [gc] [prefix Constant] { ... }
 
+The argument list is a comma seperated sequence of arguments where each
+argument is of the following form
+
+Syntax::
+
+   <type> [parameter Attrs] [name]
+
+
 .. _langref_aliases:
 
 Aliases
@@ -697,7 +707,7 @@ Aliases may have an optional :ref:`linkage type <linkage>`, an optional
 
 Syntax::
 
-    @<Name> = [Visibility] [DLLStorageClass] [ThreadLocal] [unnamed_addr] alias [Linkage] <AliaseeTy> @<Aliasee>
+    @<Name> = [Linkage] [Visibility] [DLLStorageClass] [ThreadLocal] [unnamed_addr] alias <AliaseeTy> @<Aliasee>
 
 The linkage must be one of ``private``, ``internal``, ``linkonce``, ``weak``,
 ``linkonce_odr``, ``weak_odr``, ``external``. Note that some system linkers
@@ -727,7 +737,7 @@ Comdats
 
 Comdat IR provides access to COFF and ELF object file COMDAT functionality.
 
-Comdats have a name which represents the COMDAT key.  All global objects which
+Comdats have a name which represents the COMDAT key.  All global objects that
 specify this key will only end up in the final object file if the linker chooses
 that key over some other key.  Aliases are placed in the same COMDAT that their
 aliasee computes to, if any.
@@ -773,7 +783,7 @@ In a COFF object file, this will create a COMDAT section with selection kind
 ``IMAGE_COMDAT_SELECT_LARGEST`` containing the contents of the ``@foo`` symbol
 and another COMDAT section with selection kind
 ``IMAGE_COMDAT_SELECT_ASSOCIATIVE`` which is associated with the first COMDAT
-section and contains the contents of the ``@baz`` symbol.
+section and contains the contents of the ``@bar`` symbol.
 
 There are some restrictions on the properties of the global object.
 It, or an alias to it, must have the same name as the COMDAT group when
@@ -932,7 +942,7 @@ Currently, only the following parameter attributes are defined:
 
 ``noalias``
     This indicates that pointer values :ref:`based <pointeraliasing>` on
-    the argument or return value do not alias pointer values which are
+    the argument or return value do not alias pointer values that are
     not *based* on it, ignoring certain "irrelevant" dependencies. For a
     call to the parent function, dependencies between memory references
     from before or after the call and from those during the call are
@@ -1000,7 +1010,7 @@ string:
     define void @f() gc "name" { ... }
 
 The compiler declares the supported values of *name*. Specifying a
-collector which will cause the compiler to alter its output in order to
+collector will cause the compiler to alter its output in order to
 support the named garbage collection algorithm.
 
 .. _prefixdata:
@@ -1116,7 +1126,7 @@ example:
     This indicates that the callee function at a call site should be
     recognized as a built-in function, even though the function's declaration
     uses the ``nobuiltin`` attribute. This is only valid at call sites for
-    direct calls to functions which are declared with the ``nobuiltin``
+    direct calls to functions that are declared with the ``nobuiltin``
     attribute.
 ``cold``
     This attribute indicates that this function is rarely called. When
@@ -1611,7 +1621,7 @@ Given that definition, R\ :sub:`byte` is defined as follows:
 
 -  If R is volatile, the result is target-dependent. (Volatile is
    supposed to give guarantees which can support ``sig_atomic_t`` in
-   C/C++, and may be used for accesses to addresses which do not behave
+   C/C++, and may be used for accesses to addresses that do not behave
    like normal memory. It does not generally provide cross-thread
    synchronization.)
 -  Otherwise, if there is no write to the same byte that happens before
@@ -1699,7 +1709,7 @@ For a simpler introduction to the ordering constraints, see the
     address. This corresponds to the C++0x/C1x ``memory_order_acq_rel``.
 ``seq_cst`` (sequentially consistent)
     In addition to the guarantees of ``acq_rel`` (``acquire`` for an
-    operation which only reads, ``release`` for an operation which only
+    operation that only reads, ``release`` for an operation that only
     writes), there is a global total order on all
     sequentially-consistent operations on all addresses, which is
     consistent with the *happens-before* partial order and with the
@@ -1747,6 +1757,52 @@ otherwise unsafe floating point operations
    Fast - Allow algebraically equivalent transformations that may
    dramatically change results in floating point (e.g. reassociate). This
    flag implies all the others.
+
+.. _uselistorder:
+
+Use-list Order Directives
+-------------------------
+
+Use-list directives encode the in-memory order of each use-list, allowing the
+order to be recreated.  ``<order-indexes>`` is a comma-separated list of
+indexes that are assigned to the referenced value's uses.  The referenced
+value's use-list is immediately sorted by these indexes.
+
+Use-list directives may appear at function scope or global scope.  They are not
+instructions, and have no effect on the semantics of the IR.  When they're at
+function scope, they must appear after the terminator of the final basic block.
+
+If basic blocks have their address taken via ``blockaddress()`` expressions,
+``uselistorder_bb`` can be used to reorder their use-lists from outside their
+function's scope.
+
+:Syntax:
+
+::
+
+    uselistorder <ty> <value>, { <order-indexes> }
+    uselistorder_bb @function, %block { <order-indexes> }
+
+:Examples:
+
+::
+
+    define void @foo(i32 %arg1, i32 %arg2) {
+    entry:
+      ; ... instructions ...
+    bb:
+      ; ... instructions ...
+
+      ; At function scope.
+      uselistorder i32 %arg1, { 1, 0, 2 }
+      uselistorder label %bb, { 1, 0 }
+    }
+
+    ; At global scope.
+    uselistorder i32* @global, { 1, 2, 0 }
+    uselistorder i32 7, { 1, 0 }
+    uselistorder i32 (i32) @bar, { 1, 0 }
+    uselistorder_bb @foo, %bb, { 5, 1, 3, 2, 0, 4 }
 
 .. _typesystem:
 
@@ -1966,8 +2022,8 @@ type. Vector types are considered :ref:`first class <t_firstclass>`.
       < <# elements> x <elementtype> >
 
 The number of elements is a constant integer value larger than 0;
-elementtype may be any integer or floating point type, or a pointer to
-these types. Vectors of size zero are not allowed.
+elementtype may be any integer, floating point or pointer type. Vectors
+of size zero are not allowed.
 
 :Examples:
 
@@ -2220,7 +2276,9 @@ constants and smaller complex constants.
     square brackets (``[]``)). For example:
     "``[ i32 42, i32 11, i32 74 ]``". Array constants must have
     :ref:`array type <t_array>`, and the number and types of elements must
-    match those specified by the type.
+    match those specified by the type. As a special case, character array
+    constants may also be represented as a double-quoted string using the ``c``
+    prefix. For example: "``c"Hello World\0A\00"``".
 **Vector constants**
     Vector constants are represented with notation similar to vector
     type definitions (a comma separated list of elements, surrounded by
@@ -2337,7 +2395,7 @@ allowed to assume that the '``undef``' operand could be the same as
       %C = xor %B, %B
 
       %D = undef
-      %E = icmp lt %D, 4
+      %E = icmp slt %D, 4
       %F = icmp gte %D, 4
 
     Safe:
@@ -2402,8 +2460,8 @@ Poison Values
 
 Poison values are similar to :ref:`undef values <undefvalues>`, however
 they also represent the fact that an instruction or constant expression
-which cannot evoke side effects has nevertheless detected a condition
-which results in undefined behavior.
+that cannot evoke side effects has nevertheless detected a condition
+that results in undefined behavior.
 
 There is currently no way of representing a poison value in the IR; they
 only exist when produced by operations such as :ref:`add <i_add>` with
@@ -2440,8 +2498,8 @@ Poison value behavior is defined in terms of value *dependence*:
    successor.
 -  Dependence is transitive.
 
-Poison Values have the same behavior as :ref:`undef values <undefvalues>`,
-with the additional affect that any instruction which has a *dependence*
+Poison values have the same behavior as :ref:`undef values <undefvalues>`,
+with the additional effect that any instruction that has a *dependence*
 on a poison value has undefined behavior.
 
 Here are some examples:
@@ -5019,7 +5077,7 @@ Example:
 
       %agg1 = insertvalue {i32, float} undef, i32 1, 0              ; yields {i32 1, float undef}
       %agg2 = insertvalue {i32, float} %agg1, float %val, 1         ; yields {i32 1, float %val}
-      %agg3 = insertvalue {i32, {float}} %agg1, float %val, 1, 0    ; yields {i32 1, float %val}
+      %agg3 = insertvalue {i32, {float}} undef, float %val, 1, 0    ; yields {i32 undef, {float %val}}
 
 .. _memoryops:
 
@@ -5099,7 +5157,7 @@ Syntax:
 
 ::
 
-      <result> = load [volatile] <ty>* <pointer>[, align <alignment>][, !nontemporal !<index>][, !invariant.load !<index>]
+      <result> = load [volatile] <ty>* <pointer>[, align <alignment>][, !nontemporal !<index>][, !invariant.load !<index>][, !nonnull !<index>]
       <result> = load atomic [volatile] <ty>* <pointer> [singlethread] <ordering>, align <alignment>
       !<index> = !{ i32 1 }
 
@@ -5154,6 +5212,14 @@ instruction tells the optimizer and code generator that this load
 address points to memory which does not change value during program
 execution. The optimizer may then move this load around, for example, by
 hoisting it out of loops using loop invariant code motion.
+
+The optional ``!nonnull`` metadata must reference a single
+metadata name ``<index>`` corresponding to a metadata node with no
+entries. The existence of the ``!nonnull`` metadata on the
+instruction tells the optimizer that the value loaded is known to
+never be null.  This is analogous to the ''nonnull'' attribute
+on parameters and return values.  This metadata can only be applied 
+to loads of a pointer type.  
 
 Semantics:
 """"""""""
@@ -6535,6 +6601,9 @@ This instruction requires several arguments:
    - The calling conventions of the caller and callee must match.
    - All ABI-impacting function attributes, such as sret, byval, inreg,
      returned, and inalloca, must match.
+   - The callee must be varargs iff the caller is varargs. Bitcasting a
+     non-varargs function to the appropriate varargs type is legal so
+     long as the non-varargs prefixes obey the other rules.
 
    Tail call optimization for calls marked ``tail`` is guaranteed to occur if
    the following conditions are met:
@@ -6815,14 +6884,21 @@ variable argument handling intrinsic functions are used.
 
 .. code-block:: llvm
 
+    ; This struct is different for every platform. For most platforms,
+    ; it is merely an i8*.
+    %struct.va_list = type { i8* }
+
+    ; For Unix x86_64 platforms, va_list is the following struct:
+    ; %struct.va_list = type { i32, i32, i8*, i8* }
+
     define i32 @test(i32 %X, ...) {
       ; Initialize variable argument processing
-      %ap = alloca i8*
-      %ap2 = bitcast i8** %ap to i8*
+      %ap = alloca %struct.va_list
+      %ap2 = bitcast %struct.va_list* %ap to i8*
       call void @llvm.va_start(i8* %ap2)
 
       ; Read a single integer argument
-      %tmp = va_arg i8** %ap, i32
+      %tmp = va_arg i8* %ap2, i32
 
       ; Demonstrate usage of llvm.va_copy and llvm.va_end
       %aq = alloca i8*
@@ -7959,9 +8035,9 @@ all types however.
 
       declare float     @llvm.fabs.f32(float  %Val)
       declare double    @llvm.fabs.f64(double %Val)
-      declare x86_fp80  @llvm.fabs.f80(x86_fp80  %Val)
+      declare x86_fp80  @llvm.fabs.f80(x86_fp80 %Val)
       declare fp128     @llvm.fabs.f128(fp128 %Val)
-      declare ppc_fp128 @llvm.fabs.ppcf128(ppc_fp128  %Val)
+      declare ppc_fp128 @llvm.fabs.ppcf128(ppc_fp128 %Val)
 
 Overview:
 """""""""
@@ -7980,6 +8056,89 @@ Semantics:
 
 This function returns the same values as the libm ``fabs`` functions
 would, and handles error conditions in the same way.
+
+'``llvm.minnum.*``' Intrinsic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Syntax:
+"""""""
+
+This is an overloaded intrinsic. You can use ``llvm.minnum`` on any
+floating point or vector of floating point type. Not all targets support
+all types however.
+
+::
+
+      declare float     @llvm.minnum.f32(float %Val0, float %Val1)
+      declare double    @llvm.minnum.f64(double %Val0, double %Val1)
+      declare x86_fp80  @llvm.minnum.f80(x86_fp80 %Val0, x86_fp80 %Val1)
+      declare fp128     @llvm.minnum.f128(fp128 %Val0, fp128 %Val1)
+      declare ppc_fp128 @llvm.minnum.ppcf128(ppc_fp128 %Val0, ppc_fp128 %Val1)
+
+Overview:
+"""""""""
+
+The '``llvm.minnum.*``' intrinsics return the minimum of the two
+arguments.
+
+
+Arguments:
+""""""""""
+
+The arguments and return value are floating point numbers of the same
+type.
+
+Semantics:
+""""""""""
+
+Follows the IEEE-754 semantics for minNum, which also match for libm's
+fmin.
+
+If either operand is a NaN, returns the other non-NaN operand. Returns
+NaN only if both operands are NaN. If the operands compare equal,
+returns a value that compares equal to both operands. This means that
+fmin(+/-0.0, +/-0.0) could return either -0.0 or 0.0.
+
+'``llvm.maxnum.*``' Intrinsic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Syntax:
+"""""""
+
+This is an overloaded intrinsic. You can use ``llvm.maxnum`` on any
+floating point or vector of floating point type. Not all targets support
+all types however.
+
+::
+
+      declare float     @llvm.maxnum.f32(float  %Val0, float  %Val1l)
+      declare double    @llvm.maxnum.f64(double %Val0, double %Val1)
+      declare x86_fp80  @llvm.maxnum.f80(x86_fp80  %Val0, x86_fp80  %Val1)
+      declare fp128     @llvm.maxnum.f128(fp128 %Val0, fp128 %Val1)
+      declare ppc_fp128 @llvm.maxnum.ppcf128(ppc_fp128  %Val0, ppc_fp128  %Val1)
+
+Overview:
+"""""""""
+
+The '``llvm.maxnum.*``' intrinsics return the maximum of the two
+arguments.
+
+
+Arguments:
+""""""""""
+
+The arguments and return value are floating point numbers of the same
+type.
+
+Semantics:
+""""""""""
+Follows the IEEE-754 semantics for maxNum, which also match for libm's
+fmax.
+
+If either operand is a NaN, returns the other non-NaN operand. Returns
+NaN only if both operands are NaN. If the operands compare equal,
+returns a value that compares equal to both operands. This means that
+fmax(+/-0.0, +/-0.0) could return either -0.0 or 0.0.
 
 '``llvm.copysign.*``' Intrinsic
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -9480,8 +9639,9 @@ Syntax:
 Overview:
 """""""""
 
-The ``llvm.donothing`` intrinsic doesn't perform any operation. It's the
-only intrinsic that can be called with an invoke instruction.
+The ``llvm.donothing`` intrinsic doesn't perform any operation. It's one of only
+two intrinsics (besides ``llvm.experimental.patchpoint``) that can be called
+with an invoke instruction.
 
 Arguments:
 """"""""""

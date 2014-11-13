@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_RUNTIME_DYLD_ELF_H
-#define LLVM_RUNTIME_DYLD_ELF_H
+#ifndef LLVM_LIB_EXECUTIONENGINE_RUNTIMEDYLD_RUNTIMEDYLDELF_H
+#define LLVM_LIB_EXECUTIONENGINE_RUNTIMEDYLD_RUNTIMEDYLDELF_H
 
 #include "RuntimeDyldImpl.h"
 #include "llvm/ADT/DenseMap.h"
@@ -119,7 +119,8 @@ public:
                     ObjSectionToIDMap &SectionMap) override;
   virtual ~RuntimeDyldELF();
 
-  static ObjectImage *createObjectImage(ObjectBuffer *InputBuffer);
+  static std::unique_ptr<ObjectImage>
+  createObjectImage(std::unique_ptr<ObjectBuffer> InputBuffer);
   static ObjectImage *createObjectImageFromFile(std::unique_ptr<object::ObjectFile> Obj);
 };
 

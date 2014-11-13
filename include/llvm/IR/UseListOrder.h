@@ -1,4 +1,4 @@
-//===- llvm/IR/UseListOrder.h - LLVM Use List Order functions ---*- C++ -*-===//
+//===- llvm/IR/UseListOrder.h - LLVM Use List Order -------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,8 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file has functions to modify the use-list order and to verify that it
-// doesn't change after serialization.
+// This file has structures and command-line options for preserving use-list
+// order.
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,19 +16,46 @@
 #define LLVM_IR_USELISTORDER_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
+#include <vector>
 
 namespace llvm {
 
 class Module;
+class Function;
+class Value;
+
+/// \brief Structure to hold a use-list order.
+struct UseListOrder {
+  const Value *V;
+  const Function *F;
+  std::vector<unsigned> Shuffle;
+
+  UseListOrder(const Value *V, const Function *F, size_t ShuffleSize)
+      : V(V), F(F), Shuffle(ShuffleSize) {}
+
+  UseListOrder() : V(0), F(0) {}
+  UseListOrder(UseListOrder &&X)
+      : V(X.V), F(X.F), Shuffle(std::move(X.Shuffle)) {}
+  UseListOrder &operator=(UseListOrder &&X) {
+    V = X.V;
+    F = X.F;
+    Shuffle = std::move(X.Shuffle);
+    return *this;
+  }
+
+private:
+  UseListOrder(const UseListOrder &X) LLVM_DELETED_FUNCTION;
+  UseListOrder &operator=(const UseListOrder &X) LLVM_DELETED_FUNCTION;
+};
+
+typedef std::vector<UseListOrder> UseListOrderStack;
 
 /// \brief Whether to preserve use-list ordering.
 bool shouldPreserveBitcodeUseListOrder();
 bool shouldPreserveAssemblyUseListOrder();
-
-/// \brief Shuffle all use-lists in a module.
-///
-/// Adds \c SeedOffset to the default seed for the random number generator.
-void shuffleUseLists(Module &M, unsigned SeedOffset = 0);
+void setPreserveBitcodeUseListOrder(bool ShouldPreserve);
+void setPreserveAssemblyUseListOrder(bool ShouldPreserve);
 
 } // end namespace llvm
 

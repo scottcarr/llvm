@@ -34,6 +34,7 @@
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetRegisterInfo.h"
+#include "llvm/Target/TargetSubtargetInfo.h"
 #include <cctype>
 using namespace llvm;
 
@@ -205,6 +206,16 @@ static void InitLibcallNames(const char **Names, const Triple &TT) {
   Names[RTLIB::FLOOR_F80] = "floorl";
   Names[RTLIB::FLOOR_F128] = "floorl";
   Names[RTLIB::FLOOR_PPCF128] = "floorl";
+  Names[RTLIB::FMIN_F32] = "fminf";
+  Names[RTLIB::FMIN_F64] = "fmin";
+  Names[RTLIB::FMIN_F80] = "fminl";
+  Names[RTLIB::FMIN_F128] = "fminl";
+  Names[RTLIB::FMIN_PPCF128] = "fminl";
+  Names[RTLIB::FMAX_F32] = "fmaxf";
+  Names[RTLIB::FMAX_F64] = "fmax";
+  Names[RTLIB::FMAX_F80] = "fmaxl";
+  Names[RTLIB::FMAX_F128] = "fmaxl";
+  Names[RTLIB::FMAX_PPCF128] = "fmaxl";
   Names[RTLIB::ROUND_F32] = "roundf";
   Names[RTLIB::ROUND_F64] = "round";
   Names[RTLIB::ROUND_F80] = "roundl";
@@ -686,7 +697,7 @@ static void InitCmpLibcallCCs(ISD::CondCode *CCs) {
 /// NOTE: The constructor takes ownership of TLOF.
 TargetLoweringBase::TargetLoweringBase(const TargetMachine &tm,
                                        const TargetLoweringObjectFile *tlof)
-  : TM(tm), DL(TM.getDataLayout()), TLOF(*tlof) {
+    : TM(tm), DL(TM.getSubtargetImpl()->getDataLayout()), TLOF(*tlof) {
   initActions();
 
   // Perform these initializations only once.
@@ -700,10 +711,11 @@ TargetLoweringBase::TargetLoweringBase(const TargetMachine &tm,
   HasMultipleConditionRegisters = false;
   HasExtractBitsInsn = false;
   IntDivIsCheap = false;
-  Pow2DivIsCheap = false;
+  Pow2SDivIsCheap = false;
   JumpIsExpensive = false;
   PredictableSelectIsExpensive = false;
   MaskAndBranchFoldingIsLegal = false;
+  HasFloatingPointExceptions = true;
   StackPointerRegisterToSaveRestore = 0;
   ExceptionPointerRegister = 0;
   ExceptionSelectorRegister = 0;
@@ -718,16 +730,11 @@ TargetLoweringBase::TargetLoweringBase(const TargetMachine &tm,
   PrefLoopAlignment = 0;
   MinStackArgumentAlignment = 1;
   InsertFencesForAtomic = false;
-  SupportJumpTables = true;
   MinimumJumpTableEntries = 4;
 
   InitLibcallNames(LibcallRoutineNames, Triple(TM.getTargetTriple()));
   InitCmpLibcallCCs(CmpLibcallCCs);
   InitLibcallCallingConvs(LibcallCallingConvs);
-}
-
-TargetLoweringBase::~TargetLoweringBase() {
-  delete &TLOF;
 }
 
 void TargetLoweringBase::initActions() {
@@ -756,6 +763,8 @@ void TargetLoweringBase::initActions() {
     // These operations default to expand.
     setOperationAction(ISD::FGETSIGN, (MVT::SimpleValueType)VT, Expand);
     setOperationAction(ISD::CONCAT_VECTORS, (MVT::SimpleValueType)VT, Expand);
+    setOperationAction(ISD::FMINNUM, (MVT::SimpleValueType)VT, Expand);
+    setOperationAction(ISD::FMAXNUM, (MVT::SimpleValueType)VT, Expand);
 
     // These library functions default to expand.
     setOperationAction(ISD::FROUND, (MVT::SimpleValueType)VT, Expand);
@@ -792,6 +801,8 @@ void TargetLoweringBase::initActions() {
   setOperationAction(ISD::FEXP ,  MVT::f16, Expand);
   setOperationAction(ISD::FEXP2,  MVT::f16, Expand);
   setOperationAction(ISD::FFLOOR, MVT::f16, Expand);
+  setOperationAction(ISD::FMINNUM, MVT::f16, Expand);
+  setOperationAction(ISD::FMAXNUM, MVT::f16, Expand);
   setOperationAction(ISD::FNEARBYINT, MVT::f16, Expand);
   setOperationAction(ISD::FCEIL,  MVT::f16, Expand);
   setOperationAction(ISD::FRINT,  MVT::f16, Expand);
@@ -803,6 +814,8 @@ void TargetLoweringBase::initActions() {
   setOperationAction(ISD::FEXP ,  MVT::f32, Expand);
   setOperationAction(ISD::FEXP2,  MVT::f32, Expand);
   setOperationAction(ISD::FFLOOR, MVT::f32, Expand);
+  setOperationAction(ISD::FMINNUM, MVT::f32, Expand);
+  setOperationAction(ISD::FMAXNUM, MVT::f32, Expand);
   setOperationAction(ISD::FNEARBYINT, MVT::f32, Expand);
   setOperationAction(ISD::FCEIL,  MVT::f32, Expand);
   setOperationAction(ISD::FRINT,  MVT::f32, Expand);
@@ -814,6 +827,8 @@ void TargetLoweringBase::initActions() {
   setOperationAction(ISD::FEXP ,  MVT::f64, Expand);
   setOperationAction(ISD::FEXP2,  MVT::f64, Expand);
   setOperationAction(ISD::FFLOOR, MVT::f64, Expand);
+  setOperationAction(ISD::FMINNUM, MVT::f64, Expand);
+  setOperationAction(ISD::FMAXNUM, MVT::f64, Expand);
   setOperationAction(ISD::FNEARBYINT, MVT::f64, Expand);
   setOperationAction(ISD::FCEIL,  MVT::f64, Expand);
   setOperationAction(ISD::FRINT,  MVT::f64, Expand);
@@ -825,6 +840,8 @@ void TargetLoweringBase::initActions() {
   setOperationAction(ISD::FEXP ,  MVT::f128, Expand);
   setOperationAction(ISD::FEXP2,  MVT::f128, Expand);
   setOperationAction(ISD::FFLOOR, MVT::f128, Expand);
+  setOperationAction(ISD::FMINNUM, MVT::f128, Expand);
+  setOperationAction(ISD::FMAXNUM, MVT::f128, Expand);
   setOperationAction(ISD::FNEARBYINT, MVT::f128, Expand);
   setOperationAction(ISD::FCEIL,  MVT::f128, Expand);
   setOperationAction(ISD::FRINT,  MVT::f128, Expand);
@@ -976,11 +993,10 @@ TargetLoweringBase::emitPatchPoint(MachineInstr *MI,
     // Add a new memory operand for this FI.
     const MachineFrameInfo &MFI = *MF.getFrameInfo();
     assert(MFI.getObjectOffset(FI) != -1);
-    MachineMemOperand *MMO =
-      MF.getMachineMemOperand(MachinePointerInfo::getFixedStack(FI),
-                              MachineMemOperand::MOLoad,
-                              TM.getDataLayout()->getPointerSize(),
-                              MFI.getObjectAlignment(FI));
+    MachineMemOperand *MMO = MF.getMachineMemOperand(
+        MachinePointerInfo::getFixedStack(FI), MachineMemOperand::MOLoad,
+        TM.getSubtargetImpl()->getDataLayout()->getPointerSize(),
+        MFI.getObjectAlignment(FI));
     MIB->addMemOperand(MF, MMO);
 
     // Replace the instruction and update the operand index.
@@ -996,7 +1012,8 @@ TargetLoweringBase::emitPatchPoint(MachineInstr *MI,
 /// of the register class for the specified type and its associated "cost".
 std::pair<const TargetRegisterClass*, uint8_t>
 TargetLoweringBase::findRepresentativeClass(MVT VT) const {
-  const TargetRegisterInfo *TRI = getTargetMachine().getRegisterInfo();
+  const TargetRegisterInfo *TRI =
+      getTargetMachine().getSubtargetImpl()->getRegisterInfo();
   const TargetRegisterClass *RC = RegClassForVT[VT.SimpleTy];
   if (!RC)
     return std::make_pair(RC, 0);
@@ -1179,8 +1196,12 @@ void TargetLoweringBase::computeRegisterProperties() {
         TransformToType[i] = MVT::Other;
         if (PreferredAction == TypeScalarizeVector)
           ValueTypeActions.setTypeAction(VT, TypeScalarizeVector);
-        else
+        else if (PreferredAction == TypeSplitVector)
           ValueTypeActions.setTypeAction(VT, TypeSplitVector);
+        else
+          // Set type action according to the number of elements.
+          ValueTypeActions.setTypeAction(VT, NElts == 1 ? TypeScalarizeVector
+                                                        : TypeSplitVector);
       } else {
         TransformToType[i] = NVT;
         ValueTypeActions.setTypeAction(VT, TypeWidenVector);

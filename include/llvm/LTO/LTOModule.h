@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LTO_MODULE_H
-#define LTO_MODULE_H
+#ifndef LLVM_LTO_LTOMODULE_H
+#define LLVM_LTO_LTOMODULE_H
 
 #include "llvm-c/lto.h"
 #include "llvm/ADT/StringMap.h"
@@ -46,6 +46,8 @@ private:
     const GlobalValue *symbol;
   };
 
+  std::unique_ptr<LLVMContext> OwnedContext;
+
   std::unique_ptr<object::IRObjectFile> IRFile;
   std::unique_ptr<TargetMachine> _target;
   StringSet                               _linkeropt_strings;
@@ -59,8 +61,12 @@ private:
   std::vector<const char*>                _asm_undefines;
 
   LTOModule(std::unique_ptr<object::IRObjectFile> Obj, TargetMachine *TM);
+  LTOModule(std::unique_ptr<object::IRObjectFile> Obj, TargetMachine *TM,
+            std::unique_ptr<LLVMContext> Context);
 
 public:
+  ~LTOModule();
+
   /// Returns 'true' if the file or memory contents is LLVM bitcode.
   static bool isBitcodeFile(const void *mem, size_t length);
   static bool isBitcodeFile(const char *path);
@@ -71,8 +77,8 @@ public:
                                  StringRef triplePrefix);
 
   /// Create a MemoryBuffer from a memory range with an optional name.
-  static MemoryBuffer *makeBuffer(const void *mem, size_t length,
-                                  StringRef name = "");
+  static std::unique_ptr<MemoryBuffer>
+  makeBuffer(const void *mem, size_t length, StringRef name = "");
 
   /// Create an LTOModule. N.B. These methods take ownership of the buffer. The
   /// caller must have initialized the Targets, the TargetMCs, the AsmPrinters,
@@ -94,6 +100,13 @@ public:
   static LTOModule *createFromBuffer(const void *mem, size_t length,
                                      TargetOptions options, std::string &errMsg,
                                      StringRef path = "");
+
+  static LTOModule *createInLocalContext(const void *mem, size_t length,
+                                         TargetOptions options,
+                                         std::string &errMsg, StringRef path);
+  static LTOModule *createInContext(const void *mem, size_t length,
+                                    TargetOptions options, std::string &errMsg,
+                                    StringRef path, LLVMContext *Context);
 
   const Module &getModule() const {
     return const_cast<LTOModule*>(this)->getModule();
@@ -202,10 +215,9 @@ private:
   /// Get string that the data pointer points to.
   bool objcClassNameFromExpression(const Constant *c, std::string &name);
 
-  /// Create an LTOModule (private version). N.B. This method takes ownership of
-  /// the buffer.
-  static LTOModule *makeLTOModule(std::unique_ptr<MemoryBuffer> Buffer,
-                                  TargetOptions options, std::string &errMsg);
+  /// Create an LTOModule (private version).
+  static LTOModule *makeLTOModule(MemoryBufferRef Buffer, TargetOptions options,
+                                  std::string &errMsg, LLVMContext *Context);
 };
 }
-#endif // LTO_MODULE_H
+#endif

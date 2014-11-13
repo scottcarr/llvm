@@ -417,6 +417,16 @@ public:
     return NodeType >= ISD::FIRST_TARGET_MEMORY_OPCODE;
   }
 
+  /// Test if this node is a memory intrinsic (with valid pointer information).
+  /// INTRINSIC_W_CHAIN and INTRINSIC_VOID nodes are sometimes created for
+  /// non-memory intrinsics (with chains) that are not really instances of
+  /// MemSDNode. For such nodes, we need some extra state to determine the
+  /// proper classof relationship.
+  bool isMemIntrinsic() const {
+    return (NodeType == ISD::INTRINSIC_W_CHAIN ||
+            NodeType == ISD::INTRINSIC_VOID) && ((SubclassData >> 13) & 1);
+  }
+
   /// isMachineOpcode - Test if this node has a post-isel opcode, directly
   /// corresponding to a MachineInstr opcode.
   bool isMachineOpcode() const { return NodeType < 0; }
@@ -584,7 +594,7 @@ public:
   /// changes.
   /// NOTE: This is still very expensive. Use carefully.
   bool hasPredecessorHelper(const SDNode *N,
-                            SmallPtrSet<const SDNode *, 32> &Visited,
+                            SmallPtrSetImpl<const SDNode *> &Visited,
                             SmallVectorImpl<const SDNode *> &Worklist) const;
 
   /// getNumOperands - Return the number of values used by this operation.
@@ -752,6 +762,10 @@ protected:
       ValueList(VTs.VTs), UseList(nullptr),
       NumOperands(Ops.size()), NumValues(VTs.NumVTs),
       debugLoc(dl), IROrder(Order) {
+    assert(NumOperands == Ops.size() &&
+           "NumOperands wasn't wide enough for its operands!");
+    assert(NumValues == VTs.NumVTs &&
+           "NumValues wasn't wide enough for its operands!");
     for (unsigned i = 0; i != Ops.size(); ++i) {
       OperandList[i].setUser(this);
       OperandList[i].setInitial(Ops[i]);
@@ -765,7 +779,10 @@ protected:
     : NodeType(Opc), OperandsNeedDelete(false), HasDebugValue(false),
       SubclassData(0), NodeId(-1), OperandList(nullptr), ValueList(VTs.VTs),
       UseList(nullptr), NumOperands(0), NumValues(VTs.NumVTs), debugLoc(dl),
-      IROrder(Order) {}
+      IROrder(Order) {
+    assert(NumValues == VTs.NumVTs &&
+           "NumValues wasn't wide enough for its operands!");
+  }
 
   /// InitOperands - Initialize the operands list of this with 1 operand.
   void InitOperands(SDUse *Ops, const SDValue &Op0) {
@@ -824,6 +841,8 @@ protected:
       Ops[i].setInitial(Vals[i]);
     }
     NumOperands = N;
+    assert(NumOperands == N &&
+           "NumOperands wasn't wide enough for its operands!");
     OperandList = Ops;
     checkForCycles(this);
   }
@@ -1158,6 +1177,7 @@ public:
            N->getOpcode() == ISD::ATOMIC_LOAD_UMAX    ||
            N->getOpcode() == ISD::ATOMIC_LOAD         ||
            N->getOpcode() == ISD::ATOMIC_STORE        ||
+           N->isMemIntrinsic()                        ||
            N->isTargetMemoryOpcode();
   }
 };
@@ -1286,14 +1306,14 @@ public:
                      ArrayRef<SDValue> Ops, EVT MemoryVT,
                      MachineMemOperand *MMO)
     : MemSDNode(Opc, Order, dl, VTs, Ops, MemoryVT, MMO) {
+    SubclassData |= 1u << 13;
   }
 
   // Methods to support isa and dyn_cast
   static bool classof(const SDNode *N) {
     // We lower some target intrinsics to their target opcode
     // early a node with a target opcode can be of this class
-    return N->getOpcode() == ISD::INTRINSIC_W_CHAIN ||
-           N->getOpcode() == ISD::INTRINSIC_VOID ||
+    return N->isMemIntrinsic()             ||
            N->getOpcode() == ISD::PREFETCH ||
            N->isTargetMemoryOpcode();
   }
