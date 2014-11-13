@@ -40,9 +40,9 @@ namespace {
     DataConfPass() : ModulePass(ID) {}
     virtual bool runOnModule(Module &M);
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
-      AU.addRequired<DataLayout>();
-      AU.addRequired<TargetLibraryInfo>();
-      AU.addRequired<AliasAnalysis>();
+      AU.addRequired<DataLayoutPass>();
+      //AU.addRequired<TargetLibraryInfo>();
+      //AU.addRequired<AliasAnalysis>();
     }
   };
 }

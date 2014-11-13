@@ -32,6 +32,16 @@ using namespace llvm;
 using namespace DataConf;
 using namespace DataConfAnalysis;
 
+void DataConf::dumpModule(Module &M) {
+  std::error_code ec;
+  StringRef name = "a";
+  std::string mname = name.str() + "_analyze.ll";
+  //raw_fd_ostream fout(mname.c_str(), errorStr);
+  raw_fd_ostream fout(StringRef(mname), ec, sys::fs::F_None);
+  M.print(fout, NULL);
+  fout.close();
+}
+
 string DataConfAnalysis::getString(Protection p) {
   switch (p) {
     case ALWAYS:

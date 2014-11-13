@@ -12,14 +12,6 @@ namespace DataConf {
 
   enum Protection {NEVER=0, ALWAYS, MAYBE, CONST};
 
-  static void dumpModule(Module &M) {
-    std::error_code ec;
-    StringRef name = "a";
-    std::string mname = name.str() + ".ll";
-    //raw_fd_ostream fout(mname.c_str(), errorStr);
-    raw_fd_ostream fout(StringRef(mname), ec, sys::fs::F_None);
-    M.print(fout, NULL);
-    fout.close();
-  }
+  void dumpModule(Module &M);
 }
 #endif

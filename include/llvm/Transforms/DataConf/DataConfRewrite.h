@@ -21,7 +21,7 @@ namespace DataConfRewrite {
       static Value* convertToType(Type *targetType, Value* originalVal, IRBuilder<> &IRB);
       void CheckCallByType(FunctionType* FType, CallInst *CI, FunctionAnalysis &FA);
   };
-  static Function *CheckInterfaceFunction(Constant *FuncOrBitcast);
+  Function *CheckInterfaceFunction(Constant *FuncOrBitcast);
 
   struct CPIInterfaceFunctions {
     Function *CPIInitFn;
@@ -76,7 +76,7 @@ namespace DataConfRewrite {
     Function *CPIReadDoubleFn;
     Function *CPIWriteDoubleFn;
   };
-  static void CreateCPIInterfaceFunctions(DataLayout *DL, 
+  void CreateCPIInterfaceFunctions(DataLayout *DL, 
       Module &M, 
       CPIInterfaceFunctions &IF);
 }

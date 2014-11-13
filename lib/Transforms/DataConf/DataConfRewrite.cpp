@@ -392,14 +392,14 @@ void ModuleRewrite::CheckCallByType(FunctionType* FType, CallInst *CI, FunctionA
   }
 }
 
-static Function *DataConfRewrite::CheckInterfaceFunction(Constant *FuncOrBitcast) {
+Function *DataConfRewrite::CheckInterfaceFunction(Constant *FuncOrBitcast) {
   if (isa<Function>(FuncOrBitcast)) return cast<Function>(FuncOrBitcast);
   FuncOrBitcast->dump();
   report_fatal_error("trying to redefine an CPI "
       "interface function");
 }
 
-static void DataConfRewrite::CreateCPIInterfaceFunctions(DataLayout *DL, Module &M,
+void DataConfRewrite::CreateCPIInterfaceFunctions(DataLayout *DL, Module &M,
     CPIInterfaceFunctions &IF) {
   LLVMContext &C = M.getContext();
   Type *VoidTy = Type::getVoidTy(C);
