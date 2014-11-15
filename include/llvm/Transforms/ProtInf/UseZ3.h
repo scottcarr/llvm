@@ -19,12 +19,22 @@
 
 using namespace std;
 using namespace llvm;
+using namespace z3;
 
 class ConstraintSolver {
   public:
-  vector<Value*> solveConstraints( vector<pair<Value*, Value*> > &equivalences,
-                                          vector<Value*> &constrain_safe,                            
-                                          vector<Value*> &constrain_unsafe);
+  ConstraintSolver( vector<pair<Value*, Value*> > &equivalences,
+                                          set<Value*> &constrain_safe,                            
+                                          set<Value*> &constrain_unsafe)
+    : equiv(equivalences), constrain_s(constrain_safe), constrain_u(constrain_unsafe)  {}
+  vector<Value*> solveConstraints(); 
+  private:
+  map<Value*, string> names;
+  vector<pair<Value*, Value*> > &equiv;
+  set<Value*> &constrain_s;                            
+  set<Value*> &constrain_u;
+  void print_err(expr_vector unsat_core);
+  Value *getValue(string name);
 };
 
 #endif

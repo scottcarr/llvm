@@ -8,13 +8,15 @@ using namespace std;
 
 class ModuleInf {
   vector<pair<Value*, Value*> > equivalences;
-  vector<Value*> constrain_safe;
-  vector<Value*> constrain_unsafe;
+  set<Value*> constrain_safe;
+  set<Value*> constrain_unsafe;
 
   private:
+  vector<tuple<Type*, Type*, Type*> > typeAliases;
   set<Type*> sensitiveTypes;
   Module &M;
   void getSensitiveTypes();
+  vector<pair<StringRef, Type*>> getAnnotations();
   void analyzeFunction(Function &F);
   bool isSensitive(Type *t);
   bool isUnderlyingTypeStruct(Type *t);

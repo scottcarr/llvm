@@ -39,7 +39,7 @@ namespace {
 bool ProtInfPass::runOnModule(Module &M) {
   bool changed = false;
   ModuleInf mi(M);
-  mi.dumpConstraints();
+  //mi.dumpConstraints();
   return changed;
 }
 

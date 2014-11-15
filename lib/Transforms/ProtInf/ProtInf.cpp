@@ -98,15 +98,15 @@ void ModuleInf::analyzeFunction(Function &F) {
       Value *valOp = SI->getValueOperand();
       equate(ptrOp, valOp);
       if (isProtectedStruct(ptrOp)) {
-        constrain_safe.push_back(ptrOp);
-        constrain_unsafe.push_back(valOp);
+        constrain_safe.insert(ptrOp);
+        constrain_unsafe.insert(valOp);
       }
     } else if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
       Value *ptrOp = LI->getPointerOperand();
       equate(LI, ptrOp);
       if (isProtectedStruct(ptrOp)) {
-        constrain_safe.push_back(ptrOp);
-        constrain_unsafe.push_back(LI);
+        constrain_safe.insert(ptrOp);
+        constrain_unsafe.insert(LI);
       }
     } else if (ReturnInst *RI = dyn_cast<ReturnInst>(I)) {
       if (Value *rv = dyn_cast<Value>(RI)) {
@@ -121,7 +121,7 @@ void ModuleInf::analyzeFunction(Function &F) {
         if (Fn->isDeclaration()) {
           // for now, let's try making all libraries unprotected
           for (auto& it : CI->arg_operands()) {
-            constrain_unsafe.push_back(it);
+            constrain_unsafe.insert(it);
           }
         }
         auto it = Fn->arg_begin();
@@ -132,9 +132,13 @@ void ModuleInf::analyzeFunction(Function &F) {
           ++it;
         }
       }
-      //} else if (AllocaInst *AI = dyn_cast<AllocaInst>(I)) {
-    } else if (isa<AllocaInst>(I)) {
-    // this variable is allocated on the stack which is safe
+    } else if (AllocaInst *AI = dyn_cast<AllocaInst>(I)) {
+      // this variable is allocated on the stack which is safe
+      // but if this variable is stored to the heap we need to protect
+      // the store ... or maybe the safestack handles this?
+      if(isSensitive(AI->getType()) && isUnderlyingTypeStruct(AI->getType())) {
+        constrain_safe.insert(AI);
+      }
     } else if (isa<BranchInst>(I)) {
     //} else if (BranchInst *BI = dyn_cast<BranchInst>(I)) {
     } else if (PHINode *Phi = dyn_cast<PHINode>(I)) {
@@ -216,6 +220,45 @@ bool ModuleInf::isUnderlyingTypeStruct(Type *type) {
   return false;
 }
 void ModuleInf::getSensitiveTypes() {
+  vector<pair<StringRef, Type*>> ann = getAnnotations();
+  
+  // first get all the sensitive types:
+  for (auto outer : ann) {
+    Type *sensitive = NULL, *maybe = NULL, *unsafe = NULL;
+    if(outer.first.startswith("sensitive")) {
+      sensitiveTypes.insert(outer.second);
+      sensitive = outer.second;
+      StringRef ending = outer.first.trim("sensitive");
+      for (auto inner : ann) {
+        if (inner.first.endswith(ending) &&
+            inner.first.startswith("maybe"))
+        {
+          maybe = inner.second;
+        }
+        if (inner.first.endswith(ending) &&
+            inner.first.startswith("unsafe"))
+        {
+          unsafe = inner.second;
+        }
+      }
+      if (sensitive && maybe && unsafe) {
+        typeAliases.push_back(tuple<Type*, Type*, Type*>(sensitive, maybe, unsafe));
+      } else {
+        errs() << outer.first << "\n";
+        llvm_unreachable("unable to find all three versions of type");
+      }
+    }
+  }
+  if (ann.size() != (typeAliases.size() * 3)) {
+    llvm_unreachable("some how lost some annotations");
+  }
+  errs() << "this module's sensitive types are:\n";
+  for (auto it: sensitiveTypes) {
+    errs() << *it << "\n";
+  }
+}
+vector<pair<StringRef,Type*>> ModuleInf::getAnnotations() {
+  vector<pair<StringRef, Type*>> annotations;
   for (Module::global_iterator I = M.global_begin(), E = M.global_end();
       I != E;
       ++I) {
@@ -237,12 +280,11 @@ void ModuleInf::getSensitiveTypes() {
             (da = dyn_cast<ConstantDataArray>(c->getOperand(0)))) 
         {
           StringRef sr = da->getAsCString();
-          if (sr.equals("sensitive")) {
-            if (val->getType()->isPointerTy()) {
-              Type* sType = val->getType()->getPointerElementType();
-              sensitiveTypes.insert(sType);
-            }
-            sensitiveTypes.insert(val->getType());
+          if (sr.startswith("sensitive") || 
+              sr.startswith("maybe") ||
+              sr.startswith("unsafe")) 
+          {
+            annotations.push_back(pair<StringRef, Type*>(sr, val->getType()));
           } else {
             errs() << "in module: " << M.getModuleIdentifier() << "\n";
             errs() << sr << "\n";
@@ -257,6 +299,7 @@ void ModuleInf::getSensitiveTypes() {
       }
     }
   }
+  return annotations;
 }
 ModuleInf::ModuleInf(Module &m) : M(m) {
   getSensitiveTypes();
@@ -269,7 +312,7 @@ ModuleInf::ModuleInf(Module &m) : M(m) {
       //fa.dump();
     }
   }
-  ConstraintSolver cs;
-  cs.solveConstraints(equivalences, constrain_safe, constrain_unsafe);
+  ConstraintSolver cs(equivalences, constrain_safe, constrain_unsafe);
+  cs.solveConstraints();
 }
 

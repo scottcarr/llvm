@@ -22,16 +22,62 @@ using namespace std;
 using namespace z3;
 using namespace llvm;
 
-vector<Value*> ConstraintSolver::solveConstraints( 
-    vector<pair<Value*, Value*> > &equivalences,
-    vector<Value*> &constrain_safe,                            
-    vector<Value*> &constrain_unsafe) 
+void ConstraintSolver::print_err(expr_vector unsat_core) {
+  stringstream ss;
+  //errs() << "size: " << unsat_core.size() << "\n";
+  //for (size_t i = 0; i < unsat_core.size(); ++i) {
+  //  cout << "\t" << unsat_core[i] << "\n";
+  //}
+  for (size_t i = 0; i < unsat_core.size(); ++i) {
+    //cout << "\t" << unsat_core[i] << "\n";
+    ss.str("");
+    ss << unsat_core[i];
+    size_t eqIndex = ss.str().find_first_of("==");
+    string b0 = ss.str().substr(0, eqIndex);
+    string b1 = ss.str().substr(eqIndex + 2, ss.str().size() - b0.size() - 2);
+    //cout << b0 << " == " << b1 << "\n";
+    Value *v0 = getValue(b0);
+    Value *v1 = getValue(b1);
+
+    if (constrain_s.find(v0) != constrain_s.end()) {
+      errs() << "(safe)";
+    }
+    errs() << "\t";
+    if (constrain_u.find(v0) != constrain_s.end()) {
+      errs() << "(unsafe)";
+    }
+    errs() << "\t";
+    v0->print(errs());
+    errs() << "\n";
+    if (constrain_s.find(v1) != constrain_s.end()) {
+      errs() << "(safe)";
+    }
+    errs() << "\t";
+    if (constrain_u.find(v1) != constrain_s.end()) {
+      errs() << "(unsafe)";
+    }
+    errs() << "\t";
+    v1->print(errs());
+    errs() << "\n";
+    errs() << "\n";
+   
+  }
+}
+Value *ConstraintSolver::getValue(string name) {
+  for (auto it : names) {
+    if (it.second == name) {
+      return it.first;
+    }
+  }
+  errs() << name << "\n";
+  llvm_unreachable("name not found");
+}
+vector<Value*> ConstraintSolver::solveConstraints()
 {
   //set<Value*> declared;
   vector<Value*> result;
   stringstream ss;
   int i = 0;
-  map<Value*, string> names;
 
   std::error_code ec;
   raw_fd_ostream z3_input(StringRef("z3_input"), ec, sys::fs::F_None);
@@ -49,7 +95,7 @@ vector<Value*> ConstraintSolver::solveConstraints(
   //s.add(e);
     
 
-  for (auto it : equivalences) {
+  for (auto it : equiv) {
     if (names.find(it.first) == names.end()) {
       ss.str("");
       ss << "b" << i++;
@@ -63,7 +109,7 @@ vector<Value*> ConstraintSolver::solveConstraints(
       z3_input << "(declare-const b" << it.second << " Bool)\n";
     }
   }
-  for (auto it : constrain_safe) {
+  for (auto it : constrain_s) {
     if (names.find(it) == names.end()) {
       ss.str("");
       ss << "b" << i++;
@@ -71,7 +117,7 @@ vector<Value*> ConstraintSolver::solveConstraints(
       z3_input << "(declare-const b" << it << " Bool)\n";
     }
   }
-  for (auto it : constrain_unsafe) {
+  for (auto it : constrain_u) {
     if (names.find(it) == names.end()) {
       ss.str("");
       ss << "b" << i++;
@@ -80,7 +126,7 @@ vector<Value*> ConstraintSolver::solveConstraints(
     }
   }
 
-  for (auto& it : equivalences) {
+  for (auto& it : equiv) {
     auto name0 = names.find(it.first)->second;
     auto name1 = names.find(it.second)->second;
     expr bc1 = c.bool_const(name0.c_str());
@@ -91,7 +137,7 @@ vector<Value*> ConstraintSolver::solveConstraints(
     z3_input << "(assert (= b" << it.first << " b" << it.second << "))\n";
   }
 
-  for (auto& it : constrain_unsafe) {
+  for (auto& it : constrain_u) {
     auto name = names.find(it)->second.c_str();
     expr b = c.bool_const(name);
     expr constr = b == c.bool_val(false);
@@ -99,7 +145,7 @@ vector<Value*> ConstraintSolver::solveConstraints(
     z3_input << "(assert (= b" << it << " false))\n";
   }
 
-  for (auto& it : constrain_safe) {
+  for (auto& it : constrain_s) {
     auto name = names.find(it)->second.c_str();
     expr b = c.bool_const(name);
     expr constr = b == c.bool_val(true);
@@ -118,24 +164,25 @@ vector<Value*> ConstraintSolver::solveConstraints(
   //  s.add(constr);
   //}
 
-  cout << s << "\n";
+  //cout << s << "\n";
   switch (s.check()) {
     case unsat: 
       {
       errs() << "unsat\n";
-      expr_vector core = s.unsat_core();
-      errs() << "unsat core: " << core << "\n";
-      errs() << "size: " << core.size() << "\n";
-      for (size_t i = 0; i < core.size(); ++i) {
-        cout << "\t" << core[i] << "\n";
-      }
+      print_err(s.unsat_core());
+      //expr_vector core = s.unsat_core();
+      //errs() << "unsat core: " << core << "\n";
+      //errs() << "size: " << core.size() << "\n";
+      //for (size_t i = 0; i < core.size(); ++i) {
+      //  cout << "\t" << core[i] << "\n";
+      //}
       }
       break;
     case sat: 
       {
       errs() << "sat\n";
       model m = s.get_model();
-      cout << "model :" << m << "\n";
+      //cout << "model :" << m << "\n";
       break;
       }
     case unknown: 
