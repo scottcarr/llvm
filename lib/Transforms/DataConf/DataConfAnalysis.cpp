@@ -12,7 +12,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/DataLayout.h"
-#include "llvm/Support/InstIterator.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/PassManager.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"

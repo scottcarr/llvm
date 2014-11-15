@@ -11,7 +11,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/DataLayout.h"
-#include "llvm/Support/InstIterator.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/PassManager.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
@@ -99,14 +99,14 @@ void ModuleInf::analyzeFunction(Function &F) {
       equate(ptrOp, valOp);
       if (isProtectedStruct(ptrOp)) {
         constrain_safe.insert(ptrOp);
-        constrain_unsafe.insert(valOp);
+        constrain_safe.insert(valOp);
       }
     } else if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
       Value *ptrOp = LI->getPointerOperand();
       equate(LI, ptrOp);
       if (isProtectedStruct(ptrOp)) {
         constrain_safe.insert(ptrOp);
-        constrain_unsafe.insert(LI);
+        constrain_safe.insert(LI);
       }
     } else if (ReturnInst *RI = dyn_cast<ReturnInst>(I)) {
       if (Value *rv = dyn_cast<Value>(RI)) {
