@@ -313,6 +313,11 @@ ModuleInf::ModuleInf(Module &m) : M(m) {
     }
   }
   ConstraintSolver cs(equivalences, constrain_safe, constrain_unsafe);
-  cs.solveConstraints();
+  map<Value*, bool> results;
+  if (cs.trySolveConstraints(results)) {
+
+  } else {
+    llvm_unreachable("could not solve constraints");
+  }
 }
 

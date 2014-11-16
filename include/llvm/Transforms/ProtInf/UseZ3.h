@@ -27,7 +27,7 @@ class ConstraintSolver {
                                           set<Value*> &constrain_safe,                            
                                           set<Value*> &constrain_unsafe)
     : equiv(equivalences), constrain_s(constrain_safe), constrain_u(constrain_unsafe)  {}
-  vector<Value*> solveConstraints(); 
+  bool trySolveConstraints(map<Value*,bool> &results); 
   private:
   map<Value*, string> names;
   vector<pair<Value*, Value*> > &equiv;
@@ -35,6 +35,7 @@ class ConstraintSolver {
   set<Value*> &constrain_u;
   void print_err(expr_vector unsat_core);
   Value *getValue(string name);
+  void translateModel(context *c, model *m, map<Value*, bool> &results);
 };
 
 #endif

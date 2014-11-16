@@ -72,10 +72,35 @@ Value *ConstraintSolver::getValue(string name) {
   errs() << name << "\n";
   llvm_unreachable("name not found");
 }
-vector<Value*> ConstraintSolver::solveConstraints()
+
+void ConstraintSolver::translateModel(context *c, model *m, map<Value*, bool> &results) {
+  stringstream ss;
+  for (size_t i = 0; i < m->num_consts(); ++i) {
+    ss.str("");
+    bool result;
+    func_decl fd = m->get_const_decl(i);
+    expr interp = m->get_const_interp(fd);
+    ss << fd;
+    if (ss.str().find("==")) {
+      continue;
+    }
+    if (eq(interp, c->bool_val(false))) {
+      result = false;
+    } else {
+      result = true;
+    }
+    for (auto& it : names) {
+      if (it.second == fd.name().str()) {
+        results[it.first] = result;
+        continue;
+      }
+    }
+    llvm_unreachable("should have found name");
+  }
+}
+
+bool ConstraintSolver::trySolveConstraints(map<Value*, bool> &results)
 {
-  //set<Value*> declared;
-  vector<Value*> result;
   stringstream ss;
   int i = 0;
 
@@ -83,17 +108,10 @@ vector<Value*> ConstraintSolver::solveConstraints()
   raw_fd_ostream z3_input(StringRef("z3_input"), ec, sys::fs::F_None);
 
   config cfg;
-  //cfg.set("auto-config", true);
   cfg.set("unsat_core", true);
-  //cout << cfg << "\n";
+  //cfg.set("model_validate", true);
   context c(cfg);
-  //context c;
   solver s(c);
-  //expr bc1 = c.bool_const("x");
-  //expr bc2 = c.bool_const("y");
-  //expr e = bc1 == bc2;
-  //s.add(e);
-    
 
   for (auto it : equiv) {
     if (names.find(it.first) == names.end()) {
@@ -153,40 +171,22 @@ vector<Value*> ConstraintSolver::solveConstraints()
     z3_input << "(assert (= b" << it << " true))\n";
   }
 
-  //for (auto& it : constrain_safe) {
-  //  expr bc = c.bool_const(it->getValueName()->first().str().c_str());
-  //  expr constr = bc == c.bool_val(true);
-  //  s.add(constr);
-  //}
-  //for (auto& it : constrain_unsafe) {
-  //  expr bc = c.bool_const(it->getValueName()->first().str().c_str());
-  //  expr constr = bc == c.bool_val(false);
-  //  s.add(constr);
-  //}
-
-  //cout << s << "\n";
   switch (s.check()) {
+    case sat: 
+      {
+      model m = s.get_model();
+      errs() << "sat\n";
+      translateModel(&c, &m, results);
+      return true;
+      }
     case unsat: 
       {
       errs() << "unsat\n";
       print_err(s.unsat_core());
-      //expr_vector core = s.unsat_core();
-      //errs() << "unsat core: " << core << "\n";
-      //errs() << "size: " << core.size() << "\n";
-      //for (size_t i = 0; i < core.size(); ++i) {
-      //  cout << "\t" << core[i] << "\n";
-      //}
       }
-      break;
-    case sat: 
-      {
-      errs() << "sat\n";
-      model m = s.get_model();
-      //cout << "model :" << m << "\n";
-      break;
-      }
+      return true;
     case unknown: 
       errs() << "unknonw\n";
+      return false;
   }
-  return result;
 }

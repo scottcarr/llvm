@@ -26,7 +26,6 @@
 using namespace llvm;
 using namespace std;
 
-
 namespace {
   struct ProtInfPass : public ModulePass {
     static char ID;
