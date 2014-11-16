@@ -24,10 +24,6 @@ using namespace llvm;
 
 void ConstraintSolver::print_err(expr_vector unsat_core) {
   stringstream ss;
-  //errs() << "size: " << unsat_core.size() << "\n";
-  //for (size_t i = 0; i < unsat_core.size(); ++i) {
-  //  cout << "\t" << unsat_core[i] << "\n";
-  //}
   for (size_t i = 0; i < unsat_core.size(); ++i) {
     //cout << "\t" << unsat_core[i] << "\n";
     ss.str("");
