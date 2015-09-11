@@ -1,24 +1,30 @@
 set(LLVM_TARGET_DEFINITIONS Hexagon.td)
 
+tablegen(LLVM HexagonGenAsmWriter.inc -gen-asm-writer)
+tablegen(LLVM HexagonGenCallingConv.inc -gen-callingconv)
+tablegen(LLVM HexagonGenDAGISel.inc -gen-dag-isel)
+tablegen(LLVM HexagonGenDFAPacketizer.inc -gen-dfa-packetizer)
 tablegen(LLVM HexagonGenDisassemblerTables.inc -gen-disassembler)
-tablegen(LLVM HexagonGenRegisterInfo.inc -gen-register-info)
 tablegen(LLVM HexagonGenInstrInfo.inc -gen-instr-info)
 tablegen(LLVM HexagonGenMCCodeEmitter.inc -gen-emitter)
-tablegen(LLVM HexagonGenAsmWriter.inc -gen-asm-writer)
-tablegen(LLVM HexagonGenDAGISel.inc -gen-dag-isel)
-tablegen(LLVM HexagonGenCallingConv.inc -gen-callingconv)
+tablegen(LLVM HexagonGenRegisterInfo.inc -gen-register-info)
 tablegen(LLVM HexagonGenSubtargetInfo.inc -gen-subtarget)
-tablegen(LLVM HexagonGenDFAPacketizer.inc -gen-dfa-packetizer)
 add_public_tablegen_target(HexagonCommonTableGen)
 
 add_llvm_target(HexagonCodeGen
+  BitTracker.cpp
   HexagonAsmPrinter.cpp
-  HexagonCallingConvLower.cpp
+  HexagonBitTracker.cpp
   HexagonCFGOptimizer.cpp
+  HexagonCommonGEP.cpp
   HexagonCopyToCombine.cpp
+  HexagonExpandCondsets.cpp
   HexagonExpandPredSpillCode.cpp
   HexagonFixupHwLoops.cpp
   HexagonFrameLowering.cpp
+  HexagonGenExtract.cpp
+  HexagonGenInsert.cpp
+  HexagonGenPredicate.cpp
   HexagonHardwareLoops.cpp
   HexagonInstrInfo.cpp
   HexagonISelDAGToDAG.cpp
@@ -32,7 +38,6 @@ add_llvm_target(HexagonCodeGen
   HexagonRemoveSZExtArgs.cpp
   HexagonSelectionDAGInfo.cpp
   HexagonSplitConst32AndConst64.cpp
-  HexagonSplitTFRCondSets.cpp
   HexagonSubtarget.cpp
   HexagonTargetMachine.cpp
   HexagonTargetObjectFile.cpp
@@ -40,6 +45,5 @@ add_llvm_target(HexagonCodeGen
 )
 
 add_subdirectory(TargetInfo)
-add_subdirectory(InstPrinter)
 add_subdirectory(MCTargetDesc)
 add_subdirectory(Disassembler)

@@ -95,7 +95,7 @@ public:
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
-    AU.addRequired<LoopInfo>();
+    AU.addRequired<LoopInfoWrapperPass>();
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<PostDominatorTree>();
   }
@@ -217,13 +217,16 @@ void SampleProfileLoader::printBlockWeight(raw_ostream &OS, BasicBlock *BB) {
 /// \returns The profiled weight of I.
 unsigned SampleProfileLoader::getInstWeight(Instruction &Inst) {
   DebugLoc DLoc = Inst.getDebugLoc();
+  if (!DLoc)
+    return 0;
+
   unsigned Lineno = DLoc.getLine();
   if (Lineno < HeaderLineno)
     return 0;
 
-  DILocation DIL(DLoc.getAsMDNode(*Ctx));
+  const DILocation *DIL = DLoc;
   int LOffset = Lineno - HeaderLineno;
-  unsigned Discriminator = DIL.getDiscriminator();
+  unsigned Discriminator = DIL->getDiscriminator();
   unsigned Weight = Samples->samplesAt(LOffset, Discriminator);
   DEBUG(dbgs() << "    " << Lineno << "." << Discriminator << ":" << Inst
                << " (line offset: " << LOffset << "." << Discriminator
@@ -279,7 +282,7 @@ bool SampleProfileLoader::computeBlockWeights(Function &F) {
 /// \brief Find equivalence classes for the given block.
 ///
 /// This finds all the blocks that are guaranteed to execute the same
-/// number of times as \p BB1. To do this, it traverses all the the
+/// number of times as \p BB1. To do this, it traverses all the
 /// descendants of \p BB1 in the dominator or post-dominator tree.
 ///
 /// A block BB2 will be in the same equivalence class as \p BB1 if
@@ -305,7 +308,7 @@ void SampleProfileLoader::findEquivalencesFor(
   for (auto *BB2 : Descendants) {
     bool IsDomParent = DomTree->dominates(BB2, BB1);
     bool IsInSameLoop = LI->getLoopFor(BB1) == LI->getLoopFor(BB2);
-    if (BB1 != BB2 && VisitedBlocks.insert(BB2) && IsDomParent &&
+    if (BB1 != BB2 && VisitedBlocks.insert(BB2).second && IsDomParent &&
         IsInSameLoop) {
       EquivalenceClass[BB2] = BB1;
 
@@ -494,7 +497,7 @@ bool SampleProfileLoader::propagateThroughEdges(Function &F) {
                          << " known. Set weight for block: ";
                   printBlockWeight(dbgs(), BB););
           }
-          if (VisitedBlocks.insert(BB))
+          if (VisitedBlocks.insert(BB).second)
             Changed = true;
         } else if (NumUnknownEdges == 1 && VisitedBlocks.count(BB)) {
           // If there is a single unknown edge and the block has been
@@ -540,7 +543,7 @@ void SampleProfileLoader::buildEdges(Function &F) {
       llvm_unreachable("Found a stale predecessors list in a basic block.");
     for (pred_iterator PI = pred_begin(B1), PE = pred_end(B1); PI != PE; ++PI) {
       BasicBlock *B2 = *PI;
-      if (Visited.insert(B2))
+      if (Visited.insert(B2).second)
         Predecessors[B1].push_back(B2);
     }
 
@@ -550,7 +553,7 @@ void SampleProfileLoader::buildEdges(Function &F) {
       llvm_unreachable("Found a stale successors list in a basic block.");
     for (succ_iterator SI = succ_begin(B1), SE = succ_end(B1); SI != SE; ++SI) {
       BasicBlock *B2 = *SI;
-      if (Visited.insert(B2))
+      if (Visited.insert(B2).second)
         Successors[B1].push_back(B2);
     }
   }
@@ -576,6 +579,10 @@ void SampleProfileLoader::buildEdges(Function &F) {
 void SampleProfileLoader::propagateWeights(Function &F) {
   bool Changed = true;
   unsigned i = 0;
+
+  // Add an entry count to the function using the samples gathered
+  // at the function entry.
+  F.setEntryCount(Samples->getHeadSamples());
 
   // Before propagation starts, build, for each block, a list of
   // unique predecessors and successors. This is necessary to handle
@@ -639,9 +646,8 @@ void SampleProfileLoader::propagateWeights(Function &F) {
 /// \returns the line number where \p F is defined. If it returns 0,
 ///          it means that there is no debug information available for \p F.
 unsigned SampleProfileLoader::getFunctionLoc(Function &F) {
-  DISubprogram S = getDISubprogram(&F);
-  if (S.isSubprogram())
-    return S.getLineNumber();
+  if (DISubprogram *S = getDISubprogram(&F))
+    return S->getLine();
 
   // If could not find the start of \p F, emit a diagnostic to inform the user
   // about the missed opportunity.
@@ -731,7 +737,7 @@ INITIALIZE_PASS_BEGIN(SampleProfileLoader, "sample-profile",
                       "Sample Profile loader", false, false)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(PostDominatorTree)
-INITIALIZE_PASS_DEPENDENCY(LoopInfo)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(AddDiscriminators)
 INITIALIZE_PASS_END(SampleProfileLoader, "sample-profile",
                     "Sample Profile loader", false, false)
@@ -762,7 +768,7 @@ bool SampleProfileLoader::runOnFunction(Function &F) {
 
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   PDT = &getAnalysis<PostDominatorTree>();
-  LI = &getAnalysis<LoopInfo>();
+  LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   Ctx = &F.getParent()->getContext();
   Samples = Reader->getSamplesFor(F);
   if (!Samples->empty())

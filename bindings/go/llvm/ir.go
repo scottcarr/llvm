@@ -55,6 +55,9 @@ type (
 	Use struct {
 		C C.LLVMUseRef
 	}
+	Metadata struct {
+		C C.LLVMMetadataRef
+	}
 	Attribute        uint64
 	Opcode           C.LLVMOpcode
 	TypeKind         C.LLVMTypeKind
@@ -80,6 +83,9 @@ func (c Use) IsNil() bool            { return c.C == nil }
 // helpers
 func llvmTypeRefPtr(t *Type) *C.LLVMTypeRef    { return (*C.LLVMTypeRef)(unsafe.Pointer(t)) }
 func llvmValueRefPtr(t *Value) *C.LLVMValueRef { return (*C.LLVMValueRef)(unsafe.Pointer(t)) }
+func llvmMetadataRefPtr(t *Metadata) *C.LLVMMetadataRef {
+	return (*C.LLVMMetadataRef)(unsafe.Pointer(t))
+}
 func llvmBasicBlockRefPtr(t *BasicBlock) *C.LLVMBasicBlockRef {
 	return (*C.LLVMBasicBlockRef)(unsafe.Pointer(t))
 }
@@ -95,6 +101,15 @@ func llvmValueRefs(values []Value) (*C.LLVMValueRef, C.unsigned) {
 	ptlen := C.unsigned(len(values))
 	if ptlen > 0 {
 		pt = llvmValueRefPtr(&values[0])
+	}
+	return pt, ptlen
+}
+
+func llvmMetadataRefs(mds []Metadata) (*C.LLVMMetadataRef, C.unsigned) {
+	var pt *C.LLVMMetadataRef
+	ptlen := C.unsigned(len(mds))
+	if ptlen > 0 {
+		pt = llvmMetadataRefPtr(&mds[0])
 	}
 	return pt, ptlen
 }
@@ -145,6 +160,8 @@ const (
 	InAllocaAttribute           Attribute = 1 << 43
 	NonNullAttribute            Attribute = 1 << 44
 	JumpTableAttribute          Attribute = 1 << 45
+	ConvergentAttribute         Attribute = 1 << 46
+	SafeStackAttribute          Attribute = 1 << 47
 )
 
 //-------------------------------------------------------------------------
@@ -421,10 +438,10 @@ func (m Module) SetInlineAsm(asm string) {
 	C.LLVMSetModuleInlineAsm(m.C, casm)
 }
 
-func (m Module) AddNamedMetadataOperand(name string, operand Value) {
+func (m Module) AddNamedMetadataOperand(name string, operand Metadata) {
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	C.LLVMAddNamedMetadataOperand(m.C, cname, operand.C)
+	C.LLVMAddNamedMetadataOperand2(m.C, cname, operand.C)
 }
 
 func (m Module) Context() (c Context) {
@@ -628,8 +645,8 @@ func (v Value) Metadata(kind int) (rv Value) {
 	rv.C = C.LLVMGetMetadata(v.C, C.unsigned(kind))
 	return
 }
-func (v Value) SetMetadata(kind int, node Value) {
-	C.LLVMSetMetadata(v.C, C.unsigned(kind), node.C)
+func (v Value) SetMetadata(kind int, node Metadata) {
+	C.LLVMSetMetadata2(v.C, C.unsigned(kind), node.C)
 }
 
 // Conversion functions.
@@ -723,26 +740,24 @@ func (v Value) IsUndef() bool           { return C.LLVMIsUndef(v.C) != 0 }
 func ConstPointerNull(t Type) (v Value) { v.C = C.LLVMConstPointerNull(t.C); return }
 
 // Operations on metadata
-func (c Context) MDString(str string) (v Value) {
+func (c Context) MDString(str string) (md Metadata) {
 	cstr := C.CString(str)
 	defer C.free(unsafe.Pointer(cstr))
-	v.C = C.LLVMMDStringInContext(c.C, cstr, C.unsigned(len(str)))
+	md.C = C.LLVMMDString2(c.C, cstr, C.unsigned(len(str)))
 	return
 }
-func MDString(str string) (v Value) {
-	cstr := C.CString(str)
-	defer C.free(unsafe.Pointer(cstr))
-	v.C = C.LLVMMDString(cstr, C.unsigned(len(str)))
+func (c Context) MDNode(mds []Metadata) (md Metadata) {
+	ptr, nvals := llvmMetadataRefs(mds)
+	md.C = C.LLVMMDNode2(c.C, ptr, nvals)
 	return
 }
-func (c Context) MDNode(vals []Value) (v Value) {
-	ptr, nvals := llvmValueRefs(vals)
-	v.C = C.LLVMMDNodeInContext(c.C, ptr, nvals)
+func (c Context) TemporaryMDNode(mds []Metadata) (md Metadata) {
+	ptr, nvals := llvmMetadataRefs(mds)
+	md.C = C.LLVMTemporaryMDNode(c.C, ptr, nvals)
 	return
 }
-func MDNode(vals []Value) (v Value) {
-	ptr, nvals := llvmValueRefs(vals)
-	v.C = C.LLVMMDNode(ptr, nvals)
+func (v Value) ConstantAsMetadata() (md Metadata) {
+	md.C = C.LLVMConstantAsMetadata(v.C)
 	return
 }
 
@@ -1188,8 +1203,9 @@ func (b Builder) InsertWithName(instr Value, name string) {
 func (b Builder) Dispose() { C.LLVMDisposeBuilder(b.C) }
 
 // Metadata
-func (b Builder) SetCurrentDebugLocation(v Value) { C.LLVMSetCurrentDebugLocation(b.C, v.C) }
-func (b Builder) CurrentDebugLocation() (v Value) { v.C = C.LLVMGetCurrentDebugLocation(b.C); return }
+func (b Builder) SetCurrentDebugLocation(line, col uint, scope, inlinedAt Metadata) {
+	C.LLVMSetCurrentDebugLocation2(b.C, C.unsigned(line), C.unsigned(col), scope.C, inlinedAt.C)
+}
 func (b Builder) SetInstDebugLocation(v Value)    { C.LLVMSetInstDebugLocation(b.C, v.C) }
 func (b Builder) InsertDeclare(module Module, storage Value, md Value) Value {
 	f := module.NamedFunction("llvm.dbg.declare")
@@ -1712,7 +1728,7 @@ func (b Builder) CreatePtrDiff(lhs, rhs Value, name string) (v Value) {
 func (b Builder) CreateLandingPad(t Type, personality Value, nclauses int, name string) (l Value) {
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	l.C = C.LLVMBuildLandingPad(b.C, t.C, personality.C, C.unsigned(nclauses), cname)
+	l.C = C.LLVMBuildLandingPad(b.C, t.C, nil, C.unsigned(nclauses), cname)
 	return l
 }
 
@@ -1822,3 +1838,11 @@ func (pm PassManager) FinalizeFunc() bool { return C.LLVMFinalizeFunctionPassMan
 // the module provider.
 // See llvm::PassManagerBase::~PassManagerBase.
 func (pm PassManager) Dispose() { C.LLVMDisposePassManager(pm.C) }
+
+//-------------------------------------------------------------------------
+// llvm.Metadata
+//-------------------------------------------------------------------------
+
+func (md Metadata) ReplaceAllUsesWith(new Metadata) {
+	C.LLVMMetadataReplaceAllUsesWith(md.C, new.C)
+}

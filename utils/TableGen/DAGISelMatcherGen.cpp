@@ -27,10 +27,8 @@ static MVT::SimpleValueType getRegisterValueType(Record *R,
   bool FoundRC = false;
   MVT::SimpleValueType VT = MVT::Other;
   const CodeGenRegister *Reg = T.getRegBank().getReg(R);
-  ArrayRef<CodeGenRegisterClass*> RCs = T.getRegBank().getRegClasses();
 
-  for (unsigned rc = 0, e = RCs.size(); rc != e; ++rc) {
-    const CodeGenRegisterClass &RC = *RCs[rc];
+  for (const auto &RC : T.getRegBank().getRegClasses()) {
     if (!RC.contains(Reg))
       continue;
 
@@ -222,7 +220,7 @@ void MatcherGen::EmitLeafMatchCode(const TreePatternNode *N) {
   }
 
   // An UnsetInit represents a named node without any constraints.
-  if (N->getLeafValue() == UnsetInit::get()) {
+  if (isa<UnsetInit>(N->getLeafValue())) {
     assert(N->hasName() && "Unnamed ? leaf");
     return;
   }
@@ -270,8 +268,10 @@ void MatcherGen::EmitLeafMatchCode(const TreePatternNode *N) {
     // We can't model ComplexPattern uses that don't have their name taken yet.
     // The OPC_CheckComplexPattern operation implicitly records the results.
     if (N->getName().empty()) {
-      errs() << "We expect complex pattern uses to have names: " << *N << "\n";
-      exit(1);
+      std::string S;
+      raw_string_ostream OS(S);
+      OS << "We expect complex pattern uses to have names: " << *N;
+      PrintFatalError(OS.str());
     }
 
     // Remember this ComplexPattern so that we can emit it after all the other
