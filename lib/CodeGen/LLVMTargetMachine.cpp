@@ -18,6 +18,7 @@
 #include "llvm/CodeGen/MachineFunctionAnalysis.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/DataConfPass.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Verifier.h"
@@ -145,6 +146,9 @@ bool LLVMTargetMachine::addPassesToEmitFile(
     PassManagerBase &PM, raw_pwrite_stream &Out, CodeGenFileType FileType,
     bool DisableVerify, AnalysisID StartBefore, AnalysisID StartAfter,
     AnalysisID StopAfter, MachineFunctionInitializer *MFInitializer) {
+
+  PM.add(createDataConfPassPass());
+
   // Add common CodeGen passes.
   MCContext *Context =
       addPassesToGenerateCode(this, PM, DisableVerify, StartBefore, StartAfter,
