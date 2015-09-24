@@ -512,6 +512,15 @@ void SafeStack::moveDynamicAllocasToUnsafeStack(
 }
 
 bool SafeStack::runOnFunction(Function &F) {
+
+
+  // WHY IS THE SAFE STACK PASS RUNNING!
+  // I'LL SHOW YOU!!!!
+  // TODO FIXME
+  return false;
+
+  llvm_unreachable("safestack disabled!!");
+
   auto AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
 
   DEBUG(dbgs() << "[SafeStack] Function: " << F.getName() << "\n");
@@ -527,6 +536,7 @@ bool SafeStack::runOnFunction(Function &F) {
                     " is not available\n");
     return false;
   }
+
 
   {
     // Make sure the regular stack protector won't run on this function
