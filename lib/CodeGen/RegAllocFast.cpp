@@ -301,13 +301,9 @@ void RAFast::spillVirtReg(MachineBasicBlock::iterator MI,
       const MDNode *Expr = DBG->getDebugExpression();
       bool IsIndirect = DBG->isIndirectDebugValue();
       uint64_t Offset = IsIndirect ? DBG->getOperand(1).getImm() : 0;
-      DebugLoc DL;
-      if (MI == MBB->end()) {
-        // If MI is at basic block end then use last instruction's location.
-        MachineBasicBlock::iterator EI = MI;
-        DL = (--EI)->getDebugLoc();
-      } else
-        DL = MI->getDebugLoc();
+      DebugLoc DL = DBG->getDebugLoc();
+      assert(cast<DILocalVariable>(Var)->isValidLocationForIntrinsic(DL) &&
+             "Expected inlined-at fields to agree");
       MachineInstr *NewDV =
           BuildMI(*MBB, MI, DL, TII->get(TargetOpcode::DBG_VALUE))
               .addFrameIndex(FI)
@@ -372,15 +368,23 @@ void RAFast::usePhysReg(MachineOperand &MO) {
     case regDisabled:
       break;
     case regReserved:
-      assert(TRI->isSuperRegister(PhysReg, Alias) &&
+      // Either PhysReg is a subregister of Alias and we mark the
+      // whole register as free, or PhysReg is the superregister of
+      // Alias and we mark all the aliases as disabled before freeing
+      // PhysReg.
+      // In the latter case, since PhysReg was disabled, this means that
+      // its value is defined only by physical sub-registers. This check
+      // is performed by the assert of the default case in this loop.
+      // Note: The value of the superregister may only be partial
+      // defined, that is why regDisabled is a valid state for aliases.
+      assert((TRI->isSuperRegister(PhysReg, Alias) ||
+              TRI->isSuperRegister(Alias, PhysReg)) &&
              "Instruction is not using a subregister of a reserved register");
-      // Leave the superregister in the working set.
-      PhysRegState[Alias] = regFree;
-      MO.getParent()->addRegisterKilled(Alias, TRI, true);
-      return;
+      // Fall through.
     case regFree:
       if (TRI->isSuperRegister(PhysReg, Alias)) {
         // Leave the superregister in the working set.
+        PhysRegState[Alias] = regFree;
         MO.getParent()->addRegisterKilled(Alias, TRI, true);
         return;
       }
@@ -548,7 +552,7 @@ RAFast::LiveRegMap::iterator RAFast::allocVirtReg(MachineInstr *MI,
   }
 
   DEBUG(dbgs() << "Allocating " << PrintReg(VirtReg) << " from "
-               << RC->getName() << "\n");
+               << TRI->getRegClassName(RC) << "\n");
 
   unsigned BestReg = 0, BestCost = spillImpossible;
   for (ArrayRef<MCPhysReg>::iterator I = AO.begin(), E = AO.end(); I != E; ++I){
@@ -708,7 +712,7 @@ void RAFast::handleThroughOperands(MachineInstr *MI,
       continue;
     if (MO.isEarlyClobber() || MI->isRegTiedToDefOperand(i) ||
         (MO.getSubReg() && MI->readsVirtualRegister(Reg))) {
-      if (ThroughRegs.insert(Reg))
+      if (ThroughRegs.insert(Reg).second)
         DEBUG(dbgs() << ' ' << PrintReg(Reg));
     }
   }
@@ -795,10 +799,9 @@ void RAFast::AllocateBasicBlock() {
   MachineBasicBlock::iterator MII = MBB->begin();
 
   // Add live-in registers as live.
-  for (MachineBasicBlock::livein_iterator I = MBB->livein_begin(),
-         E = MBB->livein_end(); I != E; ++I)
-    if (MRI->isAllocatable(*I))
-      definePhysReg(MII, *I, regReserved);
+  for (const auto &LI : MBB->liveins())
+    if (MRI->isAllocatable(LI.PhysReg))
+      definePhysReg(MII, LI.PhysReg, regReserved);
 
   SmallVector<unsigned, 8> VirtDead;
   SmallVector<MachineInstr*, 32> Coalesced;
@@ -869,6 +872,9 @@ void RAFast::AllocateBasicBlock() {
               const MDNode *Expr = MI->getDebugExpression();
               DebugLoc DL = MI->getDebugLoc();
               MachineBasicBlock *MBB = MI->getParent();
+              assert(
+                  cast<DILocalVariable>(Var)->isValidLocationForIntrinsic(DL) &&
+                  "Expected inlined-at fields to agree");
               MachineInstr *NewDV = BuildMI(*MBB, MBB->erase(MI), DL,
                                             TII->get(TargetOpcode::DBG_VALUE))
                                         .addFrameIndex(SS)
@@ -979,10 +985,6 @@ void RAFast::AllocateBasicBlock() {
       }
     }
 
-    for (UsedInInstrSet::iterator
-         I = UsedInInstr.begin(), E = UsedInInstr.end(); I != E; ++I)
-      MRI->setRegUnitUsed(*I);
-
     // Track registers defined by instruction - early clobbers and tied uses at
     // this point.
     UsedInInstr.clear();
@@ -1023,8 +1025,7 @@ void RAFast::AllocateBasicBlock() {
 
       if (TargetRegisterInfo::isPhysicalRegister(Reg)) {
         if (!MRI->isAllocatable(Reg)) continue;
-        definePhysReg(MI, Reg, (MO.isImplicit() || MO.isDead()) ?
-                               regFree : regReserved);
+        definePhysReg(MI, Reg, MO.isDead() ? regFree : regReserved);
         continue;
       }
       LiveRegMap::iterator LRI = defineVirtReg(MI, i, Reg, CopySrc);
@@ -1043,10 +1044,6 @@ void RAFast::AllocateBasicBlock() {
     for (unsigned i = 0, e = VirtDead.size(); i != e; ++i)
       killVirtReg(VirtDead[i]);
     VirtDead.clear();
-
-    for (UsedInInstrSet::iterator
-         I = UsedInInstr.begin(), E = UsedInInstr.end(); I != E; ++I)
-      MRI->setRegUnitUsed(*I);
 
     if (CopyDst && CopyDst == CopySrc && CopyDstSub == CopySrcSub) {
       DEBUG(dbgs() << "-- coalescing: " << *MI);
@@ -1096,12 +1093,6 @@ bool RAFast::runOnMachineFunction(MachineFunction &Fn) {
     MBB = &*MBBi;
     AllocateBasicBlock();
   }
-
-  // Add the clobber lists for all the instructions we skipped earlier.
-  for (const MCInstrDesc *Desc : SkippedInstrs)
-    if (const uint16_t *Defs = Desc->getImplicitDefs())
-      while (*Defs)
-        MRI->setPhysRegUsed(*Defs++);
 
   // All machine operands and other references to virtual registers have been
   // replaced. Remove the virtual registers.

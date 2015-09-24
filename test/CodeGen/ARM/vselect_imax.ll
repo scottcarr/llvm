@@ -3,8 +3,7 @@
 ; Make sure that ARM backend with NEON handles vselect.
 
 define void @vmax_v4i32(<4 x i32>* %m, <4 x i32> %a, <4 x i32> %b) {
-; CHECK: vcgt.s32 [[QR:q[0-9]+]], [[Q1:q[0-9]+]], [[Q2:q[0-9]+]]
-; CHECK: vbsl [[QR]], [[Q1]], [[Q2]]
+; CHECK: vmax.s32 {{q[0-9]+}}, {{q[0-9]+}}, {{q[0-9]+}}
     %cmpres = icmp sgt <4 x i32> %a, %b
     %maxres = select <4 x i1> %cmpres, <4 x i32> %a,  <4 x i32> %b
     store <4 x i32> %maxres, <4 x i32>* %m
@@ -18,11 +17,11 @@ define void @vmax_v4i32(<4 x i32>* %m, <4 x i32> %a, <4 x i32> %b) {
 ; CHECK-LABEL: func_blend10:
 define void @func_blend10(%T0_10* %loadaddr, %T0_10* %loadaddr2,
                            %T1_10* %blend, %T0_10* %storeaddr) {
-  %v0 = load %T0_10* %loadaddr
-  %v1 = load %T0_10* %loadaddr2
+  %v0 = load %T0_10, %T0_10* %loadaddr
+  %v1 = load %T0_10, %T0_10* %loadaddr2
   %c = icmp slt %T0_10 %v0, %v1
-; CHECK: vbsl
-; CHECK: vbsl
+; CHECK: vmin.s16
+; CHECK: vmin.s16
 ; COST: func_blend10
 ; COST: cost of 40 {{.*}} select
   %r = select %T1_10 %c, %T0_10 %v0, %T0_10 %v1
@@ -34,11 +33,11 @@ define void @func_blend10(%T0_10* %loadaddr, %T0_10* %loadaddr2,
 ; CHECK-LABEL: func_blend14:
 define void @func_blend14(%T0_14* %loadaddr, %T0_14* %loadaddr2,
                            %T1_14* %blend, %T0_14* %storeaddr) {
-  %v0 = load %T0_14* %loadaddr
-  %v1 = load %T0_14* %loadaddr2
+  %v0 = load %T0_14, %T0_14* %loadaddr
+  %v1 = load %T0_14, %T0_14* %loadaddr2
   %c = icmp slt %T0_14 %v0, %v1
-; CHECK: vbsl
-; CHECK: vbsl
+; CHECK: vmin.s32
+; CHECK: vmin.s32
 ; COST: func_blend14
 ; COST: cost of 41 {{.*}} select
   %r = select %T1_14 %c, %T0_14 %v0, %T0_14 %v1
@@ -50,10 +49,10 @@ define void @func_blend14(%T0_14* %loadaddr, %T0_14* %loadaddr2,
 ; CHECK-LABEL: func_blend15:
 define void @func_blend15(%T0_15* %loadaddr, %T0_15* %loadaddr2,
                            %T1_15* %blend, %T0_15* %storeaddr) {
-; CHECK: vbsl
-; CHECK: vbsl
-  %v0 = load %T0_15* %loadaddr
-  %v1 = load %T0_15* %loadaddr2
+; CHECK: vmin.s32
+; CHECK: vmin.s32
+  %v0 = load %T0_15, %T0_15* %loadaddr
+  %v1 = load %T0_15, %T0_15* %loadaddr2
   %c = icmp slt %T0_15 %v0, %v1
 ; COST: func_blend15
 ; COST: cost of 82 {{.*}} select
@@ -68,8 +67,8 @@ define void @func_blend18(%T0_18* %loadaddr, %T0_18* %loadaddr2,
                            %T1_18* %blend, %T0_18* %storeaddr) {
 ; CHECK: vbsl
 ; CHECK: vbsl
-  %v0 = load %T0_18* %loadaddr
-  %v1 = load %T0_18* %loadaddr2
+  %v0 = load %T0_18, %T0_18* %loadaddr
+  %v1 = load %T0_18, %T0_18* %loadaddr2
   %c = icmp slt %T0_18 %v0, %v1
 ; COST: func_blend18
 ; COST: cost of 19 {{.*}} select
@@ -86,8 +85,8 @@ define void @func_blend19(%T0_19* %loadaddr, %T0_19* %loadaddr2,
 ; CHECK: vbsl
 ; CHECK: vbsl
 ; CHECK: vbsl
-  %v0 = load %T0_19* %loadaddr
-  %v1 = load %T0_19* %loadaddr2
+  %v0 = load %T0_19, %T0_19* %loadaddr
+  %v1 = load %T0_19, %T0_19* %loadaddr2
   %c = icmp slt %T0_19 %v0, %v1
 ; COST: func_blend19
 ; COST: cost of 50 {{.*}} select
@@ -108,8 +107,8 @@ define void @func_blend20(%T0_20* %loadaddr, %T0_20* %loadaddr2,
 ; CHECK: vbsl
 ; CHECK: vbsl
 ; CHECK: vbsl
-  %v0 = load %T0_20* %loadaddr
-  %v1 = load %T0_20* %loadaddr2
+  %v0 = load %T0_20, %T0_20* %loadaddr
+  %v1 = load %T0_20, %T0_20* %loadaddr2
   %c = icmp slt %T0_20 %v0, %v1
 ; COST: func_blend20
 ; COST: cost of 100 {{.*}} select

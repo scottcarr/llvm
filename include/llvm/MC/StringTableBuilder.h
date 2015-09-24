@@ -26,7 +26,7 @@ public:
   /// copy of s. Can only be used before the table is finalized.
   StringRef add(StringRef s) {
     assert(!isFinalized());
-    return StringIndexMap.GetOrCreateValue(s, 0).getKey();
+    return StringIndexMap.insert(std::make_pair(s, 0)).first->first();
   }
 
   enum Kind {
@@ -41,23 +41,24 @@ public:
 
   /// \brief Retrieve the string table data. Can only be used after the table
   /// is finalized.
-  StringRef data() {
+  StringRef data() const {
     assert(isFinalized());
     return StringTable;
   }
 
   /// \brief Get the offest of a string in the string table. Can only be used
   /// after the table is finalized.
-  size_t getOffset(StringRef s) {
+  size_t getOffset(StringRef s) const {
     assert(isFinalized());
-    assert(StringIndexMap.count(s) && "String is not in table!");
-    return StringIndexMap[s];
+    auto I = StringIndexMap.find(s);
+    assert(I != StringIndexMap.end() && "String is not in table!");
+    return I->second;
   }
 
   void clear();
 
 private:
-  bool isFinalized() {
+  bool isFinalized() const {
     return !StringTable.empty();
   }
 };

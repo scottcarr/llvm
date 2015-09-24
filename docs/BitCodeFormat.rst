@@ -672,7 +672,7 @@ for each library name referenced.
 MODULE_CODE_GLOBALVAR Record
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``[GLOBALVAR, pointer type, isconst, initid, linkage, alignment, section, visibility, threadlocal, unnamed_addr, dllstorageclass]``
+``[GLOBALVAR, pointer type, isconst, initid, linkage, alignment, section, visibility, threadlocal, unnamed_addr, externally_initialized, dllstorageclass, comdat]``
 
 The ``GLOBALVAR`` record (code 7) marks the declaration or definition of a
 global variable. The operand fields are:
@@ -741,7 +741,7 @@ global variable. The operand fields are:
 MODULE_CODE_FUNCTION Record
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``[FUNCTION, type, callingconv, isproto, linkage, paramattr, alignment, section, visibility, gc, prefix, dllstorageclass]``
+``[FUNCTION, type, callingconv, isproto, linkage, paramattr, alignment, section, visibility, gc, prologuedata, dllstorageclass, comdat, prefixdata, personalityfn]``
 
 The ``FUNCTION`` record (code 8) marks the declaration or definition of a
 function. The operand fields are:
@@ -784,11 +784,19 @@ function. The operand fields are:
 * *unnamed_addr*: If present and non-zero, indicates that the function has
   ``unnamed_addr``
 
-* *prefix*: If non-zero, the value index of the prefix data for this function,
+* *prologuedata*: If non-zero, the value index of the prologue data for this function,
   plus 1.
 
 * *dllstorageclass*: An encoding of the
   :ref:`dllstorageclass<bcdllstorageclass>` of this function
+
+* *comdat*: An encoding of the COMDAT of this function
+
+* *prefixdata*: If non-zero, the value index of the prefix data for this function,
+  plus 1.
+
+* *personalityfn*: If non-zero, the value index of the personality function for this function,
+  plus 1.
 
 MODULE_CODE_ALIAS Record
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -843,7 +851,7 @@ in the *paramattr* field of module block `FUNCTION`_ records, or within the
 *attr* field of function block ``INST_INVOKE`` and ``INST_CALL`` records.
 
 Entries within ``PARAMATTR_BLOCK`` are constructed to ensure that each is unique
-(i.e., no two indicies represent equivalent attribute lists).
+(i.e., no two indices represent equivalent attribute lists).
 
 .. _PARAMATTR_CODE_ENTRY:
 
@@ -896,7 +904,7 @@ table entry, which may be referenced by 0-based index from instructions,
 constants, metadata, type symbol table entries, or other type operator records.
 
 Entries within ``TYPE_BLOCK`` are constructed to ensure that each entry is
-unique (i.e., no two indicies represent structurally equivalent types).
+unique (i.e., no two indices represent structurally equivalent types).
 
 .. _TYPE_CODE_NUMENTRY:
 .. _NUMENTRY:

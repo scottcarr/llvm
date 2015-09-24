@@ -22,8 +22,9 @@ public:
 
   typedef uint64_t TargetPtrT;
 
-  RuntimeDyldMachOX86_64(RTDyldMemoryManager *MM)
-      : RuntimeDyldMachOCRTPBase(MM) {}
+  RuntimeDyldMachOX86_64(RuntimeDyld::MemoryManager &MM,
+                         RuntimeDyld::SymbolResolver &Resolver)
+      : RuntimeDyldMachOCRTPBase(MM, Resolver) {}
 
   unsigned getMaxStubSize() override { return 8; }
 
@@ -31,24 +32,29 @@ public:
 
   relocation_iterator
   processRelocationRef(unsigned SectionID, relocation_iterator RelI,
-                       ObjectImage &ObjImg, ObjSectionToIDMap &ObjSectionToID,
-                       const SymbolTableMap &Symbols, StubMap &Stubs) override {
+                       const ObjectFile &BaseObjT,
+                       ObjSectionToIDMap &ObjSectionToID,
+                       StubMap &Stubs) override {
     const MachOObjectFile &Obj =
-        static_cast<const MachOObjectFile &>(*ObjImg.getObjectFile());
+      static_cast<const MachOObjectFile &>(BaseObjT);
     MachO::any_relocation_info RelInfo =
         Obj.getRelocation(RelI->getRawDataRefImpl());
+    uint32_t RelType = Obj.getAnyRelocationType(RelInfo);
+
+    if (RelType == MachO::X86_64_RELOC_SUBTRACTOR)
+      return processSubtractRelocation(SectionID, RelI, Obj, ObjSectionToID);
 
     assert(!Obj.isRelocationScattered(RelInfo) &&
            "Scattered relocations not supported on X86_64");
 
-    RelocationEntry RE(getRelocationEntry(SectionID, ObjImg, RelI));
+    RelocationEntry RE(getRelocationEntry(SectionID, Obj, RelI));
     RE.Addend = memcpyAddend(RE);
     RelocationValueRef Value(
-        getRelocationValueRef(ObjImg, RelI, RE, ObjSectionToID, Symbols));
+        getRelocationValueRef(Obj, RelI, RE, ObjSectionToID));
 
     bool IsExtern = Obj.getPlainRelocationExternal(RelInfo);
     if (!IsExtern && RE.IsPCRel)
-      makeValueAddendPCRel(Value, ObjImg, RelI, 1 << RE.Size);
+      makeValueAddendPCRel(Value, RelI, 1 << RE.Size);
 
     if (RE.RelType == MachO::X86_64_RELOC_GOT ||
         RE.RelType == MachO::X86_64_RELOC_GOT_LOAD)
@@ -89,15 +95,23 @@ public:
     case MachO::X86_64_RELOC_BRANCH:
       writeBytesUnaligned(Value + RE.Addend, LocalAddress, 1 << RE.Size);
       break;
+    case MachO::X86_64_RELOC_SUBTRACTOR: {
+      uint64_t SectionABase = Sections[RE.Sections.SectionA].LoadAddress;
+      uint64_t SectionBBase = Sections[RE.Sections.SectionB].LoadAddress;
+      assert((Value == SectionABase || Value == SectionBBase) &&
+             "Unexpected SUBTRACTOR relocation value.");
+      Value = SectionABase - SectionBBase + RE.Addend;
+      writeBytesUnaligned(Value, LocalAddress, 1 << RE.Size);
+      break;
+    }
     case MachO::X86_64_RELOC_GOT_LOAD:
     case MachO::X86_64_RELOC_GOT:
-    case MachO::X86_64_RELOC_SUBTRACTOR:
     case MachO::X86_64_RELOC_TLV:
       Error("Relocation type not implemented yet!");
     }
   }
 
-  void finalizeSection(ObjectImage &ObjImg, unsigned SectionID,
+  void finalizeSection(const ObjectFile &Obj, unsigned SectionID,
                        const SectionRef &Section) {}
 
 private:
@@ -128,6 +142,47 @@ private:
                              MachO::X86_64_RELOC_UNSIGNED, RE.Addend, true, 2);
     resolveRelocation(TargetRE, (uint64_t)Addr);
   }
+
+  relocation_iterator
+  processSubtractRelocation(unsigned SectionID, relocation_iterator RelI,
+                            const ObjectFile &BaseObjT,
+                            ObjSectionToIDMap &ObjSectionToID) {
+    const MachOObjectFile &Obj =
+        static_cast<const MachOObjectFile&>(BaseObjT);
+    MachO::any_relocation_info RE =
+        Obj.getRelocation(RelI->getRawDataRefImpl());
+
+    unsigned Size = Obj.getAnyRelocationLength(RE);
+    uint64_t Offset = RelI->getOffset();
+    uint8_t *LocalAddress = Sections[SectionID].Address + Offset;
+    unsigned NumBytes = 1 << Size;
+
+    ErrorOr<StringRef> SubtrahendNameOrErr = RelI->getSymbol()->getName();
+    if (auto EC = SubtrahendNameOrErr.getError())
+      report_fatal_error(EC.message());
+    auto SubtrahendI = GlobalSymbolTable.find(*SubtrahendNameOrErr);
+    unsigned SectionBID = SubtrahendI->second.getSectionID();
+    uint64_t SectionBOffset = SubtrahendI->second.getOffset();
+    int64_t Addend =
+      SignExtend64(readBytesUnaligned(LocalAddress, NumBytes), NumBytes * 8);
+
+    ++RelI;
+    ErrorOr<StringRef> MinuendNameOrErr = RelI->getSymbol()->getName();
+    if (auto EC = MinuendNameOrErr.getError())
+      report_fatal_error(EC.message());
+    auto MinuendI = GlobalSymbolTable.find(*MinuendNameOrErr);
+    unsigned SectionAID = MinuendI->second.getSectionID();
+    uint64_t SectionAOffset = MinuendI->second.getOffset();
+
+    RelocationEntry R(SectionID, Offset, MachO::X86_64_RELOC_SUBTRACTOR, (uint64_t)Addend,
+                      SectionAID, SectionAOffset, SectionBID, SectionBOffset,
+                      false, Size);
+
+    addRelocationForSection(R, SectionAID);
+
+    return ++RelI;
+  }
+
 };
 }
 

@@ -22,7 +22,7 @@ Requirements
 ============
 
 In order to use the LLVM testing infrastructure, you will need all of the
-software required to build LLVM, as well as `Python <http://python.org>`_ 2.5 or
+software required to build LLVM, as well as `Python <http://python.org>`_ 2.7 or
 later.
 
 LLVM testing infrastructure organization
@@ -471,6 +471,25 @@ RUN lines:
    constraining it to a specific triple.
 
 To add more substituations, look at ``test/lit.cfg`` or ``lit.local.cfg``.
+
+
+Options
+-------
+
+The llvm lit configuration allows to customize some things with user options:
+
+``llc``, ``opt``, ...
+    Substitute the respective llvm tool name with a custom command line. This
+    allows to specify custom paths and default arguments for these tools.
+    Example:
+
+    % llvm-lit "-Dllc=llc -verify-machineinstrs"
+
+``run_long_tests``
+    Enable the execution of long running tests.
+
+``llvm_site_config``
+    Load the specified lit configuration instead of the default one.
 
 
 Other Features

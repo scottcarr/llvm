@@ -17,7 +17,9 @@
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Mangler.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCExpr.h"
@@ -146,6 +148,46 @@ LTOModule *LTOModule::createInContext(const void *mem, size_t length,
   return makeLTOModule(Buffer, options, errMsg, Context);
 }
 
+static std::unique_ptr<Module> parseBitcodeFileImpl(MemoryBufferRef Buffer,
+                                                    LLVMContext &Context,
+                                                    bool ShouldBeLazy,
+                                                    std::string &ErrMsg) {
+
+  // Find the buffer.
+  ErrorOr<MemoryBufferRef> MBOrErr =
+      IRObjectFile::findBitcodeInMemBuffer(Buffer);
+  if (std::error_code EC = MBOrErr.getError()) {
+    ErrMsg = EC.message();
+    return nullptr;
+  }
+
+  std::function<void(const DiagnosticInfo &)> DiagnosticHandler =
+      [&ErrMsg](const DiagnosticInfo &DI) {
+        raw_string_ostream Stream(ErrMsg);
+        DiagnosticPrinterRawOStream DP(Stream);
+        DI.print(DP);
+      };
+
+  if (!ShouldBeLazy) {
+    // Parse the full file.
+    ErrorOr<std::unique_ptr<Module>> M =
+        parseBitcodeFile(*MBOrErr, Context, DiagnosticHandler);
+    if (!M)
+      return nullptr;
+    return std::move(*M);
+  }
+
+  // Parse lazily.
+  std::unique_ptr<MemoryBuffer> LightweightBuf =
+      MemoryBuffer::getMemBuffer(*MBOrErr, false);
+  ErrorOr<std::unique_ptr<Module>> M =
+      getLazyBitcodeModule(std::move(LightweightBuf), Context,
+                           DiagnosticHandler, true /*ShouldLazyLoadMetadata*/);
+  if (!M)
+    return nullptr;
+  return std::move(*M);
+}
+
 LTOModule *LTOModule::makeLTOModule(MemoryBufferRef Buffer,
                                     TargetOptions options, std::string &errMsg,
                                     LLVMContext *Context) {
@@ -155,18 +197,13 @@ LTOModule *LTOModule::makeLTOModule(MemoryBufferRef Buffer,
     Context = OwnedContext.get();
   }
 
-  ErrorOr<MemoryBufferRef> MBOrErr =
-      IRObjectFile::findBitcodeInMemBuffer(Buffer);
-  if (std::error_code EC = MBOrErr.getError()) {
-    errMsg = EC.message();
+  // If we own a context, we know this is being used only for symbol
+  // extraction, not linking.  Be lazy in that case.
+  std::unique_ptr<Module> M = parseBitcodeFileImpl(
+      Buffer, *Context,
+      /* ShouldBeLazy */ static_cast<bool>(OwnedContext), errMsg);
+  if (!M)
     return nullptr;
-  }
-  ErrorOr<Module *> MOrErr = parseBitcodeFile(*MBOrErr, *Context);
-  if (std::error_code EC = MOrErr.getError()) {
-    errMsg = EC.message();
-    return nullptr;
-  }
-  std::unique_ptr<Module> M(MOrErr.get());
 
   std::string TripleStr = M->getTargetTriple();
   if (TripleStr.empty())
@@ -195,7 +232,7 @@ LTOModule *LTOModule::makeLTOModule(MemoryBufferRef Buffer,
 
   TargetMachine *target = march->createTargetMachine(TripleStr, CPU, FeatureStr,
                                                      options);
-  M->setDataLayout(target->getSubtargetImpl()->getDataLayout());
+  M->setDataLayout(target->createDataLayout());
 
   std::unique_ptr<object::IRObjectFile> IRObj(
       new object::IRObjectFile(Buffer, std::move(M)));
@@ -232,7 +269,7 @@ LTOModule::objcClassNameFromExpression(const Constant *c, std::string &name) {
       Constant *cn = gvn->getInitializer();
       if (ConstantDataArray *ca = dyn_cast<ConstantDataArray>(cn)) {
         if (ca->isCString()) {
-          name = ".objc_class_name_" + ca->getAsCString().str();
+          name = (".objc_class_name_" + ca->getAsCString()).str();
           return true;
         }
       }
@@ -249,27 +286,24 @@ void LTOModule::addObjCClass(const GlobalVariable *clgv) {
   // second slot in __OBJC,__class is pointer to superclass name
   std::string superclassName;
   if (objcClassNameFromExpression(c->getOperand(1), superclassName)) {
-    NameAndAttributes info;
-    StringMap<NameAndAttributes>::value_type &entry =
-      _undefines.GetOrCreateValue(superclassName);
-    if (!entry.getValue().name) {
-      const char *symbolName = entry.getKey().data();
-      info.name = symbolName;
+    auto IterBool =
+        _undefines.insert(std::make_pair(superclassName, NameAndAttributes()));
+    if (IterBool.second) {
+      NameAndAttributes &info = IterBool.first->second;
+      info.name = IterBool.first->first().data();
       info.attributes = LTO_SYMBOL_DEFINITION_UNDEFINED;
       info.isFunction = false;
       info.symbol = clgv;
-      entry.setValue(info);
     }
   }
 
   // third slot in __OBJC,__class is pointer to class name
   std::string className;
   if (objcClassNameFromExpression(c->getOperand(2), className)) {
-    StringSet::value_type &entry = _defines.GetOrCreateValue(className);
-    entry.setValue(1);
+    auto Iter = _defines.insert(className).first;
 
     NameAndAttributes info;
-    info.name = entry.getKey().data();
+    info.name = Iter->first().data();
     info.attributes = LTO_SYMBOL_PERMISSIONS_DATA |
       LTO_SYMBOL_DEFINITION_REGULAR | LTO_SYMBOL_SCOPE_DEFAULT;
     info.isFunction = false;
@@ -288,19 +322,17 @@ void LTOModule::addObjCCategory(const GlobalVariable *clgv) {
   if (!objcClassNameFromExpression(c->getOperand(1), targetclassName))
     return;
 
-  NameAndAttributes info;
-  StringMap<NameAndAttributes>::value_type &entry =
-    _undefines.GetOrCreateValue(targetclassName);
+  auto IterBool =
+      _undefines.insert(std::make_pair(targetclassName, NameAndAttributes()));
 
-  if (entry.getValue().name)
+  if (!IterBool.second)
     return;
 
-  const char *symbolName = entry.getKey().data();
-  info.name = symbolName;
+  NameAndAttributes &info = IterBool.first->second;
+  info.name = IterBool.first->first().data();
   info.attributes = LTO_SYMBOL_DEFINITION_UNDEFINED;
   info.isFunction = false;
   info.symbol = clgv;
-  entry.setValue(info);
 }
 
 /// addObjCClassRef - Parse i386/ppc ObjC class list data structure.
@@ -309,18 +341,17 @@ void LTOModule::addObjCClassRef(const GlobalVariable *clgv) {
   if (!objcClassNameFromExpression(clgv->getInitializer(), targetclassName))
     return;
 
-  NameAndAttributes info;
-  StringMap<NameAndAttributes>::value_type &entry =
-    _undefines.GetOrCreateValue(targetclassName);
-  if (entry.getValue().name)
+  auto IterBool =
+      _undefines.insert(std::make_pair(targetclassName, NameAndAttributes()));
+
+  if (!IterBool.second)
     return;
 
-  const char *symbolName = entry.getKey().data();
-  info.name = symbolName;
+  NameAndAttributes &info = IterBool.first->second;
+  info.name = IterBool.first->first().data();
   info.attributes = LTO_SYMBOL_DEFINITION_UNDEFINED;
   info.isFunction = false;
   info.symbol = clgv;
-  entry.setValue(info);
 }
 
 void LTOModule::addDefinedDataSymbol(const object::BasicSymbolRef &Sym) {
@@ -439,12 +470,17 @@ void LTOModule::addDefinedSymbol(const char *Name, const GlobalValue *def,
   else
     attr |= LTO_SYMBOL_SCOPE_DEFAULT;
 
-  StringSet::value_type &entry = _defines.GetOrCreateValue(Name);
-  entry.setValue(1);
+  if (def->hasComdat())
+    attr |= LTO_SYMBOL_COMDAT;
+
+  if (isa<GlobalAlias>(def))
+    attr |= LTO_SYMBOL_ALIAS;
+
+  auto Iter = _defines.insert(Name).first;
 
   // fill information structure
   NameAndAttributes info;
-  StringRef NameRef = entry.getKey();
+  StringRef NameRef = Iter->first();
   info.name = NameRef.data();
   assert(info.name[NameRef.size()] == '\0');
   info.attributes = attr;
@@ -459,15 +495,13 @@ void LTOModule::addDefinedSymbol(const char *Name, const GlobalValue *def,
 /// defined list.
 void LTOModule::addAsmGlobalSymbol(const char *name,
                                    lto_symbol_attributes scope) {
-  StringSet::value_type &entry = _defines.GetOrCreateValue(name);
+  auto IterBool = _defines.insert(name);
 
   // only add new define if not already defined
-  if (entry.getValue())
+  if (!IterBool.second)
     return;
 
-  entry.setValue(1);
-
-  NameAndAttributes &info = _undefines[entry.getKey().data()];
+  NameAndAttributes &info = _undefines[IterBool.first->first().data()];
 
   if (info.symbol == nullptr) {
     // FIXME: This is trying to take care of module ASM like this:
@@ -479,7 +513,7 @@ void LTOModule::addAsmGlobalSymbol(const char *name,
     // much.
 
     // fill information structure
-    info.name = entry.getKey().data();
+    info.name = IterBool.first->first().data();
     info.attributes =
       LTO_SYMBOL_PERMISSIONS_DATA | LTO_SYMBOL_DEFINITION_REGULAR | scope;
     info.isFunction = false;
@@ -502,24 +536,21 @@ void LTOModule::addAsmGlobalSymbol(const char *name,
 /// addAsmGlobalSymbolUndef - Add a global symbol from module-level ASM to the
 /// undefined list.
 void LTOModule::addAsmGlobalSymbolUndef(const char *name) {
-  StringMap<NameAndAttributes>::value_type &entry =
-    _undefines.GetOrCreateValue(name);
+  auto IterBool = _undefines.insert(std::make_pair(name, NameAndAttributes()));
 
-  _asm_undefines.push_back(entry.getKey().data());
+  _asm_undefines.push_back(IterBool.first->first().data());
 
   // we already have the symbol
-  if (entry.getValue().name)
+  if (!IterBool.second)
     return;
 
   uint32_t attr = LTO_SYMBOL_DEFINITION_UNDEFINED;
   attr |= LTO_SYMBOL_SCOPE_DEFAULT;
-  NameAndAttributes info;
-  info.name = entry.getKey().data();
+  NameAndAttributes &info = IterBool.first->second;
+  info.name = IterBool.first->first().data();
   info.attributes = attr;
   info.isFunction = false;
   info.symbol = nullptr;
-
-  entry.setValue(info);
 }
 
 /// Add a symbol which isn't defined just yet to a list to be resolved later.
@@ -531,16 +562,15 @@ void LTOModule::addPotentialUndefinedSymbol(const object::BasicSymbolRef &Sym,
     Sym.printName(OS);
   }
 
-  StringMap<NameAndAttributes>::value_type &entry =
-    _undefines.GetOrCreateValue(name);
+  auto IterBool = _undefines.insert(std::make_pair(name, NameAndAttributes()));
 
   // we already have the symbol
-  if (entry.getValue().name)
+  if (!IterBool.second)
     return;
 
-  NameAndAttributes info;
+  NameAndAttributes &info = IterBool.first->second;
 
-  info.name = entry.getKey().data();
+  info.name = IterBool.first->first().data();
 
   const GlobalValue *decl = IRFile->getSymbolGV(Sym.getRawDataRefImpl());
 
@@ -551,8 +581,6 @@ void LTOModule::addPotentialUndefinedSymbol(const object::BasicSymbolRef &Sym,
 
   info.isFunction = isFunc;
   info.symbol = decl;
-
-  entry.setValue(info);
 }
 
 /// parseSymbols - Parse the symbols from the module and model-level ASM and add
@@ -618,25 +646,27 @@ bool LTOModule::parseSymbols(std::string &errMsg) {
 
 /// parseMetadata - Parse metadata from the module
 void LTOModule::parseMetadata() {
+  raw_string_ostream OS(LinkerOpts);
+
   // Linker Options
-  if (Value *Val = getModule().getModuleFlag("Linker Options")) {
+  if (Metadata *Val = getModule().getModuleFlag("Linker Options")) {
     MDNode *LinkerOptions = cast<MDNode>(Val);
     for (unsigned i = 0, e = LinkerOptions->getNumOperands(); i != e; ++i) {
       MDNode *MDOptions = cast<MDNode>(LinkerOptions->getOperand(i));
       for (unsigned ii = 0, ie = MDOptions->getNumOperands(); ii != ie; ++ii) {
         MDString *MDOption = cast<MDString>(MDOptions->getOperand(ii));
-        StringRef Op = _linkeropt_strings.
-            GetOrCreateValue(MDOption->getString()).getKey();
-        StringRef DepLibName = _target->getSubtargetImpl()
-                                   ->getTargetLowering()
-                                   ->getObjFileLowering()
-                                   .getDepLibFromLinkerOpt(Op);
-        if (!DepLibName.empty())
-          _deplibs.push_back(DepLibName.data());
-        else if (!Op.empty())
-          _linkeropts.push_back(Op.data());
+        OS << " " << MDOption->getString();
       }
     }
+  }
+
+  // Globals
+  Mangler Mang;
+  for (const NameAndAttributes &Sym : _symbols) {
+    if (!Sym.symbol)
+      continue;
+    _target->getObjFileLowering()->emitLinkerFlagsForGlobal(OS, Sym.symbol,
+                                                            Mang);
   }
 
   // Add other interesting metadata here.

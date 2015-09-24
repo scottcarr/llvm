@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "AArch64.h"
+#include "AArch64CallingConvention.h"
 #include "AArch64Subtarget.h"
 #include "AArch64TargetMachine.h"
 #include "MCTargetDesc/AArch64AddressingModes.h"
@@ -35,6 +36,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/CommandLine.h"
 using namespace llvm;
 
@@ -151,6 +153,7 @@ private:
                          const Value *Cond);
   bool optimizeIntExtLoad(const Instruction *I, MVT RetVT, MVT SrcVT);
   bool optimizeSelect(const SelectInst *SI);
+  std::pair<unsigned, bool> getRegForGEPIndex(const Value *Idx);
 
   // Emit helper routines.
   unsigned emitAddSub(bool UseAdd, MVT RetVT, const Value *LHS,
@@ -243,9 +246,10 @@ public:
   unsigned fastMaterializeFloatZero(const ConstantFP* CF) override;
 
   explicit AArch64FastISel(FunctionLoweringInfo &FuncInfo,
-                         const TargetLibraryInfo *LibInfo)
+                           const TargetLibraryInfo *LibInfo)
       : FastISel(FuncInfo, LibInfo, /*SkipTargetIndependentISel=*/true) {
-    Subtarget = &TM.getSubtarget<AArch64Subtarget>();
+    Subtarget =
+        &static_cast<const AArch64Subtarget &>(FuncInfo.MF->getSubtarget());
     Context = &FuncInfo.Fn->getContext();
   }
 
@@ -300,11 +304,13 @@ static unsigned getImplicitScaleFactor(MVT VT) {
 CCAssignFn *AArch64FastISel::CCAssignFnForCall(CallingConv::ID CC) const {
   if (CC == CallingConv::WebKit_JS)
     return CC_AArch64_WebKit_JS;
+  if (CC == CallingConv::GHC)
+    return CC_AArch64_GHC;
   return Subtarget->isTargetDarwin() ? CC_AArch64_DarwinPCS : CC_AArch64_AAPCS;
 }
 
 unsigned AArch64FastISel::fastMaterializeAlloca(const AllocaInst *AI) {
-  assert(TLI.getValueType(AI->getType(), true) == MVT::i64 &&
+  assert(TLI.getValueType(DL, AI->getType(), true) == MVT::i64 &&
          "Alloca should always return a pointer.");
 
   // Don't handle dynamic allocas.
@@ -365,6 +371,24 @@ unsigned AArch64FastISel::materializeFP(const ConstantFP *CFP, MVT VT) {
     return fastEmitInst_i(Opc, TLI.getRegClassFor(VT), Imm);
   }
 
+  // For the MachO large code model materialize the FP constant in code.
+  if (Subtarget->isTargetMachO() && TM.getCodeModel() == CodeModel::Large) {
+    unsigned Opc1 = Is64Bit ? AArch64::MOVi64imm : AArch64::MOVi32imm;
+    const TargetRegisterClass *RC = Is64Bit ?
+        &AArch64::GPR64RegClass : &AArch64::GPR32RegClass;
+
+    unsigned TmpReg = createResultReg(RC);
+    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, TII.get(Opc1), TmpReg)
+        .addImm(CFP->getValueAPF().bitcastToAPInt().getZExtValue());
+
+    unsigned ResultReg = createResultReg(TLI.getRegClassFor(VT));
+    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
+            TII.get(TargetOpcode::COPY), ResultReg)
+        .addReg(TmpReg, getKillRegState(true));
+
+    return ResultReg;
+  }
+
   // Materialize via constant pool.  MachineConstantPool wants an explicit
   // alignment.
   unsigned Align = DL.getPrefTypeAlignment(CFP->getType());
@@ -396,7 +420,7 @@ unsigned AArch64FastISel::materializeGV(const GlobalValue *GV) {
 
   unsigned char OpFlags = Subtarget->ClassifyGlobalReference(GV, TM);
 
-  EVT DestEVT = TLI.getValueType(GV->getType(), true);
+  EVT DestEVT = TLI.getValueType(DL, GV->getType(), true);
   if (!DestEVT.isSimple())
     return 0;
 
@@ -435,7 +459,7 @@ unsigned AArch64FastISel::materializeGV(const GlobalValue *GV) {
 }
 
 unsigned AArch64FastISel::fastMaterializeConstant(const Constant *C) {
-  EVT CEVT = TLI.getValueType(C->getType(), true);
+  EVT CEVT = TLI.getValueType(DL, C->getType(), true);
 
   // Only handle simple types.
   if (!CEVT.isSimple())
@@ -499,7 +523,7 @@ bool AArch64FastISel::computeAddress(const Value *Obj, Address &Addr, Type *Ty)
     U = C;
   }
 
-  if (const PointerType *Ty = dyn_cast<PointerType>(Obj->getType()))
+  if (auto *Ty = dyn_cast<PointerType>(Obj->getType()))
     if (Ty->getAddressSpace() > 255)
       // Fast instruction selection doesn't support the special
       // address spaces.
@@ -514,13 +538,14 @@ bool AArch64FastISel::computeAddress(const Value *Obj, Address &Addr, Type *Ty)
   }
   case Instruction::IntToPtr: {
     // Look past no-op inttoptrs.
-    if (TLI.getValueType(U->getOperand(0)->getType()) == TLI.getPointerTy())
+    if (TLI.getValueType(DL, U->getOperand(0)->getType()) ==
+        TLI.getPointerTy(DL))
       return computeAddress(U->getOperand(0), Addr, Ty);
     break;
   }
   case Instruction::PtrToInt: {
     // Look past no-op ptrtoints.
-    if (TLI.getValueType(U->getType()) == TLI.getPointerTy())
+    if (TLI.getValueType(DL, U->getType()) == TLI.getPointerTy(DL))
       return computeAddress(U->getOperand(0), Addr, Ty);
     break;
   }
@@ -641,20 +666,22 @@ bool AArch64FastISel::computeAddress(const Value *Obj, Address &Addr, Type *Ty)
     Addr.setExtendType(AArch64_AM::LSL);
 
     const Value *Src = U->getOperand(0);
-    if (const auto *I = dyn_cast<Instruction>(Src))
-      if (FuncInfo.MBBMap[I->getParent()] == FuncInfo.MBB)
-        Src = I;
-
-    // Fold the zext or sext when it won't become a noop.
-    if (const auto *ZE = dyn_cast<ZExtInst>(Src)) {
-      if (!isIntExtFree(ZE) && ZE->getOperand(0)->getType()->isIntegerTy(32)) {
-          Addr.setExtendType(AArch64_AM::UXTW);
-          Src = ZE->getOperand(0);
-      }
-    } else if (const auto *SE = dyn_cast<SExtInst>(Src)) {
-      if (!isIntExtFree(SE) && SE->getOperand(0)->getType()->isIntegerTy(32)) {
-        Addr.setExtendType(AArch64_AM::SXTW);
-        Src = SE->getOperand(0);
+    if (const auto *I = dyn_cast<Instruction>(Src)) {
+      if (FuncInfo.MBBMap[I->getParent()] == FuncInfo.MBB) {
+        // Fold the zext or sext when it won't become a noop.
+        if (const auto *ZE = dyn_cast<ZExtInst>(I)) {
+          if (!isIntExtFree(ZE) &&
+              ZE->getOperand(0)->getType()->isIntegerTy(32)) {
+            Addr.setExtendType(AArch64_AM::UXTW);
+            Src = ZE->getOperand(0);
+          }
+        } else if (const auto *SE = dyn_cast<SExtInst>(I)) {
+          if (!isIntExtFree(SE) &&
+              SE->getOperand(0)->getType()->isIntegerTy(32)) {
+            Addr.setExtendType(AArch64_AM::SXTW);
+            Src = SE->getOperand(0);
+          }
+        }
       }
     }
 
@@ -723,21 +750,22 @@ bool AArch64FastISel::computeAddress(const Value *Obj, Address &Addr, Type *Ty)
     Addr.setExtendType(AArch64_AM::LSL);
 
     const Value *Src = LHS;
-    if (const auto *I = dyn_cast<Instruction>(Src))
-      if (FuncInfo.MBBMap[I->getParent()] == FuncInfo.MBB)
-        Src = I;
-
-
-    // Fold the zext or sext when it won't become a noop.
-    if (const auto *ZE = dyn_cast<ZExtInst>(Src)) {
-      if (!isIntExtFree(ZE) && ZE->getOperand(0)->getType()->isIntegerTy(32)) {
-        Addr.setExtendType(AArch64_AM::UXTW);
-        Src = ZE->getOperand(0);
-      }
-    } else if (const auto *SE = dyn_cast<SExtInst>(Src)) {
-      if (!isIntExtFree(SE) && SE->getOperand(0)->getType()->isIntegerTy(32)) {
-        Addr.setExtendType(AArch64_AM::SXTW);
-        Src = SE->getOperand(0);
+    if (const auto *I = dyn_cast<Instruction>(Src)) {
+      if (FuncInfo.MBBMap[I->getParent()] == FuncInfo.MBB) {
+        // Fold the zext or sext when it won't become a noop.
+        if (const auto *ZE = dyn_cast<ZExtInst>(I)) {
+          if (!isIntExtFree(ZE) &&
+              ZE->getOperand(0)->getType()->isIntegerTy(32)) {
+            Addr.setExtendType(AArch64_AM::UXTW);
+            Src = ZE->getOperand(0);
+          }
+        } else if (const auto *SE = dyn_cast<SExtInst>(I)) {
+          if (!isIntExtFree(SE) &&
+              SE->getOperand(0)->getType()->isIntegerTy(32)) {
+            Addr.setExtendType(AArch64_AM::SXTW);
+            Src = SE->getOperand(0);
+          }
+        }
       }
     }
 
@@ -751,7 +779,7 @@ bool AArch64FastISel::computeAddress(const Value *Obj, Address &Addr, Type *Ty)
     if (Addr.getOffsetReg())
       break;
 
-    if (DL.getTypeSizeInBits(Ty) != 8)
+    if (!Ty || DL.getTypeSizeInBits(Ty) != 8)
       break;
 
     const Value *LHS = U->getOperand(0);
@@ -852,13 +880,13 @@ bool AArch64FastISel::computeCallAddress(const Value *V, Address &Addr) {
   case Instruction::IntToPtr:
     // Look past no-op inttoptrs if its operand is in the same BB.
     if (InMBB &&
-        TLI.getValueType(U->getOperand(0)->getType()) == TLI.getPointerTy())
+        TLI.getValueType(DL, U->getOperand(0)->getType()) ==
+            TLI.getPointerTy(DL))
       return computeCallAddress(U->getOperand(0), Addr);
     break;
   case Instruction::PtrToInt:
     // Look past no-op ptrtoints if its operand is in the same BB.
-    if (InMBB &&
-        TLI.getValueType(U->getType()) == TLI.getPointerTy())
+    if (InMBB && TLI.getValueType(DL, U->getType()) == TLI.getPointerTy(DL))
       return computeCallAddress(U->getOperand(0), Addr);
     break;
   }
@@ -879,7 +907,7 @@ bool AArch64FastISel::computeCallAddress(const Value *V, Address &Addr) {
 
 
 bool AArch64FastISel::isTypeLegal(Type *Ty, MVT &VT) {
-  EVT evt = TLI.getValueType(Ty, true);
+  EVT evt = TLI.getValueType(DL, Ty, true);
 
   // Only handle simple types.
   if (evt == MVT::Other || !evt.isSimple())
@@ -941,7 +969,7 @@ bool AArch64FastISel::simplifyAddress(Address &Addr, MVT VT) {
 
   // Cannot encode an offset register and an immediate offset in the same
   // instruction. Fold the immediate offset into the load/store instruction and
-  // emit an additonal add to take care of the offset register.
+  // emit an additional add to take care of the offset register.
   if (!ImmediateOffsetNeedsLowering && Addr.getOffset() && Addr.getOffsetReg())
     RegisterOffsetNeedsLowering = true;
 
@@ -1030,8 +1058,8 @@ void AArch64FastISel::addLoadStoreOperands(Address &Addr,
     // FIXME: We shouldn't be using getObjectSize/getObjectAlignment.  The size
     // and alignment should be based on the VT.
     MMO = FuncInfo.MF->getMachineMemOperand(
-      MachinePointerInfo::getFixedStack(FI, Offset), Flags,
-      MFI.getObjectSize(FI), MFI.getObjectAlignment(FI));
+        MachinePointerInfo::getFixedStack(*FuncInfo.MF, FI, Offset), Flags,
+        MFI.getObjectSize(FI), MFI.getObjectAlignment(FI));
     // Now add the rest of the operands.
     MIB.addFrameIndex(FI).addImm(Offset);
   } else {
@@ -1150,7 +1178,7 @@ unsigned AArch64FastISel::emitAddSub(bool UseAdd, MVT RetVT, const Value *LHS,
   }
 
   // Check if the mul can be folded into the instruction.
-  if (RHS->hasOneUse() && isValueAvailable(RHS))
+  if (RHS->hasOneUse() && isValueAvailable(RHS)) {
     if (isMulPowOf2(RHS)) {
       const Value *MulLHS = cast<MulOperator>(RHS)->getOperand(0);
       const Value *MulRHS = cast<MulOperator>(RHS)->getOperand(1);
@@ -1165,12 +1193,16 @@ unsigned AArch64FastISel::emitAddSub(bool UseAdd, MVT RetVT, const Value *LHS,
       if (!RHSReg)
         return 0;
       bool RHSIsKill = hasTrivialKill(MulLHS);
-      return emitAddSub_rs(UseAdd, RetVT, LHSReg, LHSIsKill, RHSReg, RHSIsKill,
-                           AArch64_AM::LSL, ShiftVal, SetFlags, WantResult);
+      ResultReg = emitAddSub_rs(UseAdd, RetVT, LHSReg, LHSIsKill, RHSReg,
+                                RHSIsKill, AArch64_AM::LSL, ShiftVal, SetFlags,
+                                WantResult);
+      if (ResultReg)
+        return ResultReg;
     }
+  }
 
   // Check if the shift can be folded into the instruction.
-  if (RHS->hasOneUse() && isValueAvailable(RHS))
+  if (RHS->hasOneUse() && isValueAvailable(RHS)) {
     if (const auto *SI = dyn_cast<BinaryOperator>(RHS)) {
       if (const auto *C = dyn_cast<ConstantInt>(SI->getOperand(1))) {
         AArch64_AM::ShiftExtendType ShiftType = AArch64_AM::InvalidShiftExtend;
@@ -1186,12 +1218,15 @@ unsigned AArch64FastISel::emitAddSub(bool UseAdd, MVT RetVT, const Value *LHS,
           if (!RHSReg)
             return 0;
           bool RHSIsKill = hasTrivialKill(SI->getOperand(0));
-          return emitAddSub_rs(UseAdd, RetVT, LHSReg, LHSIsKill, RHSReg,
-                               RHSIsKill, ShiftType, ShiftVal, SetFlags,
-                               WantResult);
+          ResultReg = emitAddSub_rs(UseAdd, RetVT, LHSReg, LHSIsKill, RHSReg,
+                                    RHSIsKill, ShiftType, ShiftVal, SetFlags,
+                                    WantResult);
+          if (ResultReg)
+            return ResultReg;
         }
       }
     }
+  }
 
   unsigned RHSReg = getRegForValue(RHS);
   if (!RHSReg)
@@ -1295,6 +1330,10 @@ unsigned AArch64FastISel::emitAddSub_rs(bool UseAdd, MVT RetVT, unsigned LHSReg,
   if (RetVT != MVT::i32 && RetVT != MVT::i64)
     return 0;
 
+  // Don't deal with undefined shifts.
+  if (ShiftImm >= RetVT.getSizeInBits())
+    return 0;
+
   static const unsigned OpcTable[2][2][2] = {
     { { AArch64::SUBWrs,  AArch64::SUBXrs  },
       { AArch64::ADDWrs,  AArch64::ADDXrs  }  },
@@ -1332,6 +1371,9 @@ unsigned AArch64FastISel::emitAddSub_rx(bool UseAdd, MVT RetVT, unsigned LHSReg,
   if (RetVT != MVT::i32 && RetVT != MVT::i64)
     return 0;
 
+  if (ShiftImm >= 4)
+    return 0;
+
   static const unsigned OpcTable[2][2][2] = {
     { { AArch64::SUBWrx,  AArch64::SUBXrx  },
       { AArch64::ADDWrx,  AArch64::ADDXrx  }  },
@@ -1363,7 +1405,7 @@ unsigned AArch64FastISel::emitAddSub_rx(bool UseAdd, MVT RetVT, unsigned LHSReg,
 
 bool AArch64FastISel::emitCmp(const Value *LHS, const Value *RHS, bool IsZExt) {
   Type *Ty = LHS->getType();
-  EVT EVT = TLI.getValueType(Ty, true);
+  EVT EVT = TLI.getValueType(DL, Ty, true);
   if (!EVT.isSimple())
     return false;
   MVT VT = EVT.getSimpleVT();
@@ -1514,7 +1556,7 @@ unsigned AArch64FastISel::emitLogicalOp(unsigned ISDOpc, MVT RetVT,
     return ResultReg;
 
   // Check if the mul can be folded into the instruction.
-  if (RHS->hasOneUse() && isValueAvailable(RHS))
+  if (RHS->hasOneUse() && isValueAvailable(RHS)) {
     if (isMulPowOf2(RHS)) {
       const Value *MulLHS = cast<MulOperator>(RHS)->getOperand(0);
       const Value *MulRHS = cast<MulOperator>(RHS)->getOperand(1);
@@ -1530,12 +1572,15 @@ unsigned AArch64FastISel::emitLogicalOp(unsigned ISDOpc, MVT RetVT,
       if (!RHSReg)
         return 0;
       bool RHSIsKill = hasTrivialKill(MulLHS);
-      return emitLogicalOp_rs(ISDOpc, RetVT, LHSReg, LHSIsKill, RHSReg,
-                              RHSIsKill, ShiftVal);
+      ResultReg = emitLogicalOp_rs(ISDOpc, RetVT, LHSReg, LHSIsKill, RHSReg,
+                                   RHSIsKill, ShiftVal);
+      if (ResultReg)
+        return ResultReg;
     }
+  }
 
   // Check if the shift can be folded into the instruction.
-  if (RHS->hasOneUse() && isValueAvailable(RHS))
+  if (RHS->hasOneUse() && isValueAvailable(RHS)) {
     if (const auto *SI = dyn_cast<ShlOperator>(RHS))
       if (const auto *C = dyn_cast<ConstantInt>(SI->getOperand(1))) {
         uint64_t ShiftVal = C->getZExtValue();
@@ -1543,9 +1588,12 @@ unsigned AArch64FastISel::emitLogicalOp(unsigned ISDOpc, MVT RetVT,
         if (!RHSReg)
           return 0;
         bool RHSIsKill = hasTrivialKill(SI->getOperand(0));
-        return emitLogicalOp_rs(ISDOpc, RetVT, LHSReg, LHSIsKill, RHSReg,
-                                RHSIsKill, ShiftVal);
+        ResultReg = emitLogicalOp_rs(ISDOpc, RetVT, LHSReg, LHSIsKill, RHSReg,
+                                     RHSIsKill, ShiftVal);
+        if (ResultReg)
+          return ResultReg;
       }
+  }
 
   unsigned RHSReg = getRegForValue(RHS);
   if (!RHSReg)
@@ -1618,6 +1666,11 @@ unsigned AArch64FastISel::emitLogicalOp_rs(unsigned ISDOpc, MVT RetVT,
     { AArch64::ORRWrs, AArch64::ORRXrs },
     { AArch64::EORWrs, AArch64::EORXrs }
   };
+
+  // Don't deal with undefined shifts.
+  if (ShiftImm >= RetVT.getSizeInBits())
+    return 0;
+
   const TargetRegisterClass *RC;
   unsigned Opc;
   switch (RetVT.SimpleTy) {
@@ -1652,6 +1705,9 @@ unsigned AArch64FastISel::emitAnd_ri(MVT RetVT, unsigned LHSReg, bool LHSIsKill,
 
 unsigned AArch64FastISel::emitLoad(MVT VT, MVT RetVT, Address Addr,
                                    bool WantZExt, MachineMemOperand *MMO) {
+  if (!TLI.allowsMisalignedMemoryAccesses(VT))
+    return 0;
+
   // Simplify this down to something we can handle.
   if (!simplifyAddress(Addr, VT))
     return 0;
@@ -1894,7 +1950,8 @@ bool AArch64FastISel::selectLoad(const Instruction *I) {
     // could select it. Emit a copy to subreg if necessary. FastISel will remove
     // it when it selects the integer extend.
     unsigned Reg = lookUpRegForValue(IntExtVal);
-    if (!Reg) {
+    auto *MI = MRI.getUniqueVRegDef(Reg);
+    if (!MI) {
       if (RetVT == MVT::i64 && VT <= MVT::i32) {
         if (WantZExt) {
           // Delete the last emitted instruction from emitLoad (SUBREG_TO_REG).
@@ -1912,10 +1969,7 @@ bool AArch64FastISel::selectLoad(const Instruction *I) {
     // The integer extend has already been emitted - delete all the instructions
     // that have been emitted by the integer extend lowering code and use the
     // result from the load instruction directly.
-    while (Reg) {
-      auto *MI = MRI.getUniqueVRegDef(Reg);
-      if (!MI)
-        break;
+    while (MI) {
       Reg = 0;
       for (auto &Opnd : MI->uses()) {
         if (Opnd.isReg()) {
@@ -1924,6 +1978,9 @@ bool AArch64FastISel::selectLoad(const Instruction *I) {
         }
       }
       MI->eraseFromParent();
+      MI = nullptr;
+      if (Reg)
+        MI = MRI.getUniqueVRegDef(Reg);
     }
     updateValueMap(IntExtVal, ResultReg);
     return true;
@@ -1935,6 +1992,9 @@ bool AArch64FastISel::selectLoad(const Instruction *I) {
 
 bool AArch64FastISel::emitStore(MVT VT, unsigned SrcReg, Address Addr,
                                 MachineMemOperand *MMO) {
+  if (!TLI.allowsMisalignedMemoryAccesses(VT))
+    return false;
+
   // Simplify this down to something we can handle.
   if (!simplifyAddress(Addr, VT))
     return false;
@@ -2111,15 +2171,15 @@ bool AArch64FastISel::emitCompareAndBranch(const BranchInst *BI) {
 
   int TestBit = -1;
   bool IsCmpNE;
-  if ((Predicate == CmpInst::ICMP_EQ) || (Predicate == CmpInst::ICMP_NE)) {
-    if (const auto *C = dyn_cast<Constant>(LHS))
-      if (C->isNullValue())
-        std::swap(LHS, RHS);
+  switch (Predicate) {
+  default:
+    return false;
+  case CmpInst::ICMP_EQ:
+  case CmpInst::ICMP_NE:
+    if (isa<Constant>(LHS) && cast<Constant>(LHS)->isNullValue())
+      std::swap(LHS, RHS);
 
-    if (!isa<Constant>(RHS))
-      return false;
-
-    if (!cast<Constant>(RHS)->isNullValue())
+    if (!isa<Constant>(RHS) || !cast<Constant>(RHS)->isNullValue())
       return false;
 
     if (const auto *AI = dyn_cast<BinaryOperator>(LHS))
@@ -2142,26 +2202,27 @@ bool AArch64FastISel::emitCompareAndBranch(const BranchInst *BI) {
       TestBit = 0;
 
     IsCmpNE = Predicate == CmpInst::ICMP_NE;
-  } else if (Predicate == CmpInst::ICMP_SLT) {
-    if (!isa<Constant>(RHS))
-      return false;
-
-    if (!cast<Constant>(RHS)->isNullValue())
+    break;
+  case CmpInst::ICMP_SLT:
+  case CmpInst::ICMP_SGE:
+    if (!isa<Constant>(RHS) || !cast<Constant>(RHS)->isNullValue())
       return false;
 
     TestBit = BW - 1;
-    IsCmpNE = true;
-  } else if (Predicate == CmpInst::ICMP_SGT) {
+    IsCmpNE = Predicate == CmpInst::ICMP_SLT;
+    break;
+  case CmpInst::ICMP_SGT:
+  case CmpInst::ICMP_SLE:
     if (!isa<ConstantInt>(RHS))
       return false;
 
-    if (cast<ConstantInt>(RHS)->getValue() != -1)
+    if (cast<ConstantInt>(RHS)->getValue() != APInt(BW, -1, true))
       return false;
 
     TestBit = BW - 1;
-    IsCmpNE = false;
-  } else
-    return false;
+    IsCmpNE = Predicate == CmpInst::ICMP_SLE;
+    break;
+  } // end switch
 
   static const unsigned OpcTable[2][2][2] = {
     { {AArch64::CBZW,  AArch64::CBZX },
@@ -2199,14 +2260,7 @@ bool AArch64FastISel::emitCompareAndBranch(const BranchInst *BI) {
     MIB.addImm(TestBit);
   MIB.addMBB(TBB);
 
-  // Obtain the branch weight and add the TrueBB to the successor list.
-  uint32_t BranchWeight = 0;
-  if (FuncInfo.BPI)
-    BranchWeight = FuncInfo.BPI->getEdgeWeight(BI->getParent(),
-                                               TBB->getBasicBlock());
-  FuncInfo.MBB->addSuccessor(TBB, BranchWeight);
-  fastEmitBranch(FBB, DbgLoc);
-
+  finishCondBranch(BI->getParent(), TBB, FBB);
   return true;
 }
 
@@ -2281,14 +2335,7 @@ bool AArch64FastISel::selectBranch(const Instruction *I) {
           .addImm(CC)
           .addMBB(TBB);
 
-      // Obtain the branch weight and add the TrueBB to the successor list.
-      uint32_t BranchWeight = 0;
-      if (FuncInfo.BPI)
-        BranchWeight = FuncInfo.BPI->getEdgeWeight(BI->getParent(),
-                                                  TBB->getBasicBlock());
-      FuncInfo.MBB->addSuccessor(TBB, BranchWeight);
-
-      fastEmitBranch(FBB, DbgLoc);
+      finishCondBranch(BI->getParent(), TBB, FBB);
       return true;
     }
   } else if (TruncInst *TI = dyn_cast<TruncInst>(BI->getCondition())) {
@@ -2319,14 +2366,7 @@ bool AArch64FastISel::selectBranch(const Instruction *I) {
           .addImm(CC)
           .addMBB(TBB);
 
-      // Obtain the branch weight and add the TrueBB to the successor list.
-      uint32_t BranchWeight = 0;
-      if (FuncInfo.BPI)
-        BranchWeight = FuncInfo.BPI->getEdgeWeight(BI->getParent(),
-                                                  TBB->getBasicBlock());
-      FuncInfo.MBB->addSuccessor(TBB, BranchWeight);
-
-      fastEmitBranch(FBB, DbgLoc);
+      finishCondBranch(BI->getParent(), TBB, FBB);
       return true;
     }
   } else if (const auto *CI = dyn_cast<ConstantInt>(BI->getCondition())) {
@@ -2354,14 +2394,7 @@ bool AArch64FastISel::selectBranch(const Instruction *I) {
       .addImm(CC)
       .addMBB(TBB);
 
-    // Obtain the branch weight and add the TrueBB to the successor list.
-    uint32_t BranchWeight = 0;
-    if (FuncInfo.BPI)
-      BranchWeight = FuncInfo.BPI->getEdgeWeight(BI->getParent(),
-                                                 TBB->getBasicBlock());
-    FuncInfo.MBB->addSuccessor(TBB, BranchWeight);
-
-    fastEmitBranch(FBB, DbgLoc);
+    finishCondBranch(BI->getParent(), TBB, FBB);
     return true;
   }
 
@@ -2377,7 +2410,11 @@ bool AArch64FastISel::selectBranch(const Instruction *I) {
   // Regardless, the compare has been done in the predecessor block,
   // and it left a value for us in a virtual register.  Ergo, we test
   // the one-bit value left in the virtual register.
-  emitICmp_ri(MVT::i32, CondReg, CondRegIsKill, 0);
+  //
+  // FIXME: Optimize this with TBZW/TBZNW.
+  unsigned ANDReg = emitAnd_ri(MVT::i32, CondReg, CondRegIsKill, 1);
+  assert(ANDReg && "Unexpected AND instruction emission failure.");
+  emitICmp_ri(MVT::i32, ANDReg, /*IsKill=*/true, 0);
 
   if (FuncInfo.MBB->isLayoutSuccessor(TBB)) {
     std::swap(TBB, FBB);
@@ -2388,14 +2425,7 @@ bool AArch64FastISel::selectBranch(const Instruction *I) {
       .addImm(CC)
       .addMBB(TBB);
 
-  // Obtain the branch weight and add the TrueBB to the successor list.
-  uint32_t BranchWeight = 0;
-  if (FuncInfo.BPI)
-    BranchWeight = FuncInfo.BPI->getEdgeWeight(BI->getParent(),
-                                               TBB->getBasicBlock());
-  FuncInfo.MBB->addSuccessor(TBB, BranchWeight);
-
-  fastEmitBranch(FBB, DbgLoc);
+  finishCondBranch(BI->getParent(), TBB, FBB);
   return true;
 }
 
@@ -2411,8 +2441,8 @@ bool AArch64FastISel::selectIndirectBr(const Instruction *I) {
   BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, II).addReg(AddrReg);
 
   // Make sure the CFG is up-to-date.
-  for (unsigned i = 0, e = BI->getNumSuccessors(); i != e; ++i)
-    FuncInfo.MBB->addSuccessor(FuncInfo.MBBMap[BI->getSuccessor(i)]);
+  for (auto *Succ : BI->successors())
+    FuncInfo.MBB->addSuccessor(FuncInfo.MBBMap[Succ]);
 
   return true;
 }
@@ -2548,7 +2578,7 @@ bool AArch64FastISel::optimizeSelect(const SelectInst *SI) {
     Src1Reg = emitLogicalOp_ri(ISD::XOR, MVT::i32, Src1Reg, Src1IsKill, 1);
     Src1IsKill = true;
   }
-  unsigned ResultReg = fastEmitInst_rr(Opc, &AArch64::GPR32spRegClass, Src1Reg,
+  unsigned ResultReg = fastEmitInst_rr(Opc, &AArch64::GPR32RegClass, Src1Reg,
                                        Src1IsKill, Src2Reg, Src2IsKill);
   updateValueMap(SI, ResultReg);
   return true;
@@ -2654,8 +2684,11 @@ bool AArch64FastISel::selectSelect(const Instruction *I) {
       return false;
     bool CondIsKill = hasTrivialKill(Cond);
 
+    const MCInstrDesc &II = TII.get(AArch64::ANDSWri);
+    CondReg = constrainOperandRegClass(II, CondReg, 1);
+
     // Emit a TST instruction (ANDS wzr, reg, #imm).
-    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, TII.get(AArch64::ANDSWri),
+    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, II,
             AArch64::WZR)
         .addReg(CondReg, getKillRegState(CondIsKill))
         .addImm(AArch64_AM::encodeLogicalImmediate(1, 32));
@@ -2723,7 +2756,7 @@ bool AArch64FastISel::selectFPToInt(const Instruction *I, bool Signed) {
   if (SrcReg == 0)
     return false;
 
-  EVT SrcVT = TLI.getValueType(I->getOperand(0)->getType(), true);
+  EVT SrcVT = TLI.getValueType(DL, I->getOperand(0)->getType(), true);
   if (SrcVT == MVT::f128)
     return false;
 
@@ -2759,7 +2792,7 @@ bool AArch64FastISel::selectIntToFP(const Instruction *I, bool Signed) {
     return false;
   bool SrcIsKill = hasTrivialKill(I->getOperand(0));
 
-  EVT SrcVT = TLI.getValueType(I->getOperand(0)->getType(), true);
+  EVT SrcVT = TLI.getValueType(DL, I->getOperand(0)->getType(), true);
 
   // Handle sign-extension.
   if (SrcVT == MVT::i16 || SrcVT == MVT::i8 || SrcVT == MVT::i1) {
@@ -2818,7 +2851,7 @@ bool AArch64FastISel::fastLowerArguments() {
     if (ArgTy->isStructTy() || ArgTy->isArrayTy())
       return false;
 
-    EVT ArgVT = TLI.getValueType(ArgTy);
+    EVT ArgVT = TLI.getValueType(DL, ArgTy);
     if (!ArgVT.isSimple())
       return false;
 
@@ -2860,7 +2893,7 @@ bool AArch64FastISel::fastLowerArguments() {
   unsigned GPRIdx = 0;
   unsigned FPRIdx = 0;
   for (auto const &Arg : F->args()) {
-    MVT VT = TLI.getSimpleValueType(Arg.getType());
+    MVT VT = TLI.getSimpleValueType(DL, Arg.getType());
     unsigned SrcReg;
     const TargetRegisterClass *RC;
     if (VT >= MVT::i1 && VT <= MVT::i32) {
@@ -2915,8 +2948,7 @@ bool AArch64FastISel::processCallArgs(CallLoweringInfo &CLI,
     .addImm(NumBytes);
 
   // Process the args.
-  for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
-    CCValAssign &VA = ArgLocs[i];
+  for (CCValAssign &VA : ArgLocs) {
     const Value *ArgVal = CLI.OutVals[VA.getValNo()];
     MVT ArgVT = OutVTs[VA.getValNo()];
 
@@ -2979,8 +3011,8 @@ bool AArch64FastISel::processCallArgs(CallLoweringInfo &CLI,
 
       unsigned Alignment = DL.getABITypeAlignment(ArgVal->getType());
       MachineMemOperand *MMO = FuncInfo.MF->getMachineMemOperand(
-        MachinePointerInfo::getStack(Addr.getOffset()),
-        MachineMemOperand::MOStore, ArgVT.getStoreSize(), Alignment);
+          MachinePointerInfo::getStack(*FuncInfo.MF, Addr.getOffset()),
+          MachineMemOperand::MOStore, ArgVT.getStoreSize(), Alignment);
 
       if (!emitStore(ArgVT, ArgReg, Addr, MMO))
         return false;
@@ -3010,6 +3042,11 @@ bool AArch64FastISel::finishCall(CallLoweringInfo &CLI, MVT RetVT,
 
     // Copy all of the result registers out of their specified physreg.
     MVT CopyVT = RVLocs[0].getValVT();
+
+    // TODO: Handle big-endian results
+    if (CopyVT.isVector() && !Subtarget->isLittleEndian())
+      return false;
+
     unsigned ResultReg = createResultReg(TLI.getRegClassFor(CopyVT));
     BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
             TII.get(TargetOpcode::COPY), ResultReg)
@@ -3028,9 +3065,9 @@ bool AArch64FastISel::fastLowerCall(CallLoweringInfo &CLI) {
   bool IsTailCall     = CLI.IsTailCall;
   bool IsVarArg       = CLI.IsVarArg;
   const Value *Callee = CLI.Callee;
-  const char *SymName = CLI.SymName;
+  MCSymbol *Symbol = CLI.Symbol;
 
-  if (!Callee && !SymName)
+  if (!Callee && !Symbol)
     return false;
 
   // Allow SelectionDAG isel to handle tail calls.
@@ -3092,8 +3129,8 @@ bool AArch64FastISel::fastLowerCall(CallLoweringInfo &CLI) {
   if (CM == CodeModel::Small) {
     const MCInstrDesc &II = TII.get(Addr.getReg() ? AArch64::BLR : AArch64::BL);
     MIB = BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, II);
-    if (SymName)
-      MIB.addExternalSymbol(SymName, 0);
+    if (Symbol)
+      MIB.addSym(Symbol, 0);
     else if (Addr.getGlobalValue())
       MIB.addGlobalAddress(Addr.getGlobalValue(), 0, 0);
     else if (Addr.getReg()) {
@@ -3103,18 +3140,18 @@ bool AArch64FastISel::fastLowerCall(CallLoweringInfo &CLI) {
       return false;
   } else {
     unsigned CallReg = 0;
-    if (SymName) {
+    if (Symbol) {
       unsigned ADRPReg = createResultReg(&AArch64::GPR64commonRegClass);
       BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, TII.get(AArch64::ADRP),
               ADRPReg)
-        .addExternalSymbol(SymName, AArch64II::MO_GOT | AArch64II::MO_PAGE);
+          .addSym(Symbol, AArch64II::MO_GOT | AArch64II::MO_PAGE);
 
       CallReg = createResultReg(&AArch64::GPR64RegClass);
-      BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, TII.get(AArch64::LDRXui),
-              CallReg)
-        .addReg(ADRPReg)
-        .addExternalSymbol(SymName, AArch64II::MO_GOT | AArch64II::MO_PAGEOFF |
-                           AArch64II::MO_NC);
+      BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
+              TII.get(AArch64::LDRXui), CallReg)
+          .addReg(ADRPReg)
+          .addSym(Symbol,
+                  AArch64II::MO_GOT | AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
     } else if (Addr.getGlobalValue())
       CallReg = materializeGV(Addr.getGlobalValue());
     else if (Addr.getReg())
@@ -3134,7 +3171,7 @@ bool AArch64FastISel::fastLowerCall(CallLoweringInfo &CLI) {
 
   // Add a register mask with the call-preserved registers.
   // Proper defs for return values will be added by setPhysRegsDeadExcept().
-  MIB.addRegMask(TRI.getCallPreservedMask(CC));
+  MIB.addRegMask(TRI.getCallPreservedMask(*FuncInfo.MF, CC));
 
   CLI.Call = MIB;
 
@@ -3233,7 +3270,7 @@ bool AArch64FastISel::foldXALUIntrinsic(AArch64CC::CondCode &CC,
     std::swap(LHS, RHS);
 
   // Simplify multiplies.
-  unsigned IID = II->getIntrinsicID();
+  Intrinsic::ID IID = II->getIntrinsicID();
   switch (IID) {
   default:
     break;
@@ -3301,8 +3338,7 @@ bool AArch64FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
     MFI->setFrameAddressIsTaken(true);
 
     const AArch64RegisterInfo *RegInfo =
-        static_cast<const AArch64RegisterInfo *>(
-            TM.getSubtargetImpl()->getRegisterInfo());
+        static_cast<const AArch64RegisterInfo *>(Subtarget->getRegisterInfo());
     unsigned FramePtr = RegInfo->getFrameRegister(*(FuncInfo.MF));
     unsigned SrcReg = MRI.createVirtualRegister(&AArch64::GPR64RegClass);
     BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
@@ -3419,7 +3455,8 @@ bool AArch64FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
     }
 
     CallLoweringInfo CLI;
-    CLI.setCallee(TLI.getLibcallCallingConv(LC), II->getType(),
+    MCContext &Ctx = MF->getContext();
+    CLI.setCallee(DL, Ctx, TLI.getLibcallCallingConv(LC), II->getType(),
                   TLI.getLibcallName(LC), std::move(Args));
     if (!lowerCallTo(CLI))
       return false;
@@ -3502,7 +3539,7 @@ bool AArch64FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
       std::swap(LHS, RHS);
 
     // Simplify multiplies.
-    unsigned IID = II->getIntrinsicID();
+    Intrinsic::ID IID = II->getIntrinsicID();
     switch (IID) {
     default:
       break;
@@ -3566,7 +3603,10 @@ bool AArch64FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
                     AArch64_AM::ASR, 31, /*WantResult=*/false);
       } else {
         assert(VT == MVT::i64 && "Unexpected value type.");
-        MulReg = emitMul_rr(VT, LHSReg, LHSIsKill, RHSReg, RHSIsKill);
+        // LHSReg and RHSReg cannot be killed by this Mul, since they are
+        // reused in the next instruction.
+        MulReg = emitMul_rr(VT, LHSReg, /*IsKill=*/false, RHSReg,
+                            /*IsKill=*/false);
         unsigned SMULHReg = fastEmit_rr(VT, VT, ISD::MULHS, LHSReg, LHSIsKill,
                                         RHSReg, RHSIsKill);
         emitSubs_rs(VT, SMULHReg, /*IsKill=*/true, MulReg, /*IsKill=*/false,
@@ -3595,7 +3635,10 @@ bool AArch64FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
                                             AArch64::sub_32);
       } else {
         assert(VT == MVT::i64 && "Unexpected value type.");
-        MulReg = emitMul_rr(VT, LHSReg, LHSIsKill, RHSReg, RHSIsKill);
+        // LHSReg and RHSReg cannot be killed by this Mul, since they are
+        // reused in the next instruction.
+        MulReg = emitMul_rr(VT, LHSReg, /*IsKill=*/false, RHSReg,
+                            /*IsKill=*/false);
         unsigned UMULHReg = fastEmit_rr(VT, VT, ISD::MULHU, LHSReg, LHSIsKill,
                                         RHSReg, RHSIsKill);
         emitSubs_rr(VT, AArch64::XZR, /*IsKill=*/true, UMULHReg,
@@ -3640,7 +3683,7 @@ bool AArch64FastISel::selectRet(const Instruction *I) {
   if (Ret->getNumOperands() > 0) {
     CallingConv::ID CC = F.getCallingConv();
     SmallVector<ISD::OutputArg, 4> Outs;
-    GetReturnInfo(F.getReturnType(), F.getAttributes(), Outs, TLI);
+    GetReturnInfo(F.getReturnType(), F.getAttributes(), Outs, TLI, DL);
 
     // Analyze operands of the call, assigning locations to each operand.
     SmallVector<CCValAssign, 16> ValLocs;
@@ -3675,7 +3718,7 @@ bool AArch64FastISel::selectRet(const Instruction *I) {
     if (!MRI.getRegClass(SrcReg)->contains(DestReg))
       return false;
 
-    EVT RVEVT = TLI.getValueType(RV->getType());
+    EVT RVEVT = TLI.getValueType(DL, RV->getType());
     if (!RVEVT.isSimple())
       return false;
 
@@ -3713,8 +3756,8 @@ bool AArch64FastISel::selectRet(const Instruction *I) {
 
   MachineInstrBuilder MIB = BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
                                     TII.get(AArch64::RET_ReallyLR));
-  for (unsigned i = 0, e = RetRegs.size(); i != e; ++i)
-    MIB.addReg(RetRegs[i], RegState::Implicit);
+  for (unsigned RetReg : RetRegs)
+    MIB.addReg(RetReg, RegState::Implicit);
   return true;
 }
 
@@ -3723,8 +3766,8 @@ bool AArch64FastISel::selectTrunc(const Instruction *I) {
   Value *Op = I->getOperand(0);
   Type *SrcTy = Op->getType();
 
-  EVT SrcEVT = TLI.getValueType(SrcTy, true);
-  EVT DestEVT = TLI.getValueType(DestTy, true);
+  EVT SrcEVT = TLI.getValueType(DL, SrcTy, true);
+  EVT DestEVT = TLI.getValueType(DL, DestTy, true);
   if (!SrcEVT.isSimple())
     return false;
   if (!DestEVT.isSimple())
@@ -3885,7 +3928,7 @@ unsigned AArch64FastISel::emitLSL_rr(MVT RetVT, unsigned Op0Reg, bool Op0IsKill,
 
 unsigned AArch64FastISel::emitLSL_ri(MVT RetVT, MVT SrcVT, unsigned Op0,
                                      bool Op0IsKill, uint64_t Shift,
-                                     bool IsZext) {
+                                     bool IsZExt) {
   assert(RetVT.SimpleTy >= SrcVT.SimpleTy &&
          "Unexpected source/return type pair.");
   assert((SrcVT == MVT::i1 || SrcVT == MVT::i8 || SrcVT == MVT::i16 ||
@@ -3898,6 +3941,20 @@ unsigned AArch64FastISel::emitLSL_ri(MVT RetVT, MVT SrcVT, unsigned Op0,
   unsigned RegSize = Is64Bit ? 64 : 32;
   unsigned DstBits = RetVT.getSizeInBits();
   unsigned SrcBits = SrcVT.getSizeInBits();
+  const TargetRegisterClass *RC =
+      Is64Bit ? &AArch64::GPR64RegClass : &AArch64::GPR32RegClass;
+
+  // Just emit a copy for "zero" shifts.
+  if (Shift == 0) {
+    if (RetVT == SrcVT) {
+      unsigned ResultReg = createResultReg(RC);
+      BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
+              TII.get(TargetOpcode::COPY), ResultReg)
+          .addReg(Op0, getKillRegState(Op0IsKill));
+      return ResultReg;
+    } else
+      return emitIntExt(SrcVT, Op0, RetVT, IsZExt);
+  }
 
   // Don't deal with undefined shifts.
   if (Shift >= DstBits)
@@ -3935,9 +3992,7 @@ unsigned AArch64FastISel::emitLSL_ri(MVT RetVT, MVT SrcVT, unsigned Op0,
     {AArch64::SBFMWri, AArch64::SBFMXri},
     {AArch64::UBFMWri, AArch64::UBFMXri}
   };
-  unsigned Opc = OpcTable[IsZext][Is64Bit];
-  const TargetRegisterClass *RC =
-      Is64Bit ? &AArch64::GPR64RegClass : &AArch64::GPR32RegClass;
+  unsigned Opc = OpcTable[IsZExt][Is64Bit];
   if (SrcVT.SimpleTy <= MVT::i32 && RetVT == MVT::i64) {
     unsigned TmpReg = MRI.createVirtualRegister(RC);
     BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
@@ -3983,8 +4038,9 @@ unsigned AArch64FastISel::emitLSR_ri(MVT RetVT, MVT SrcVT, unsigned Op0,
                                      bool IsZExt) {
   assert(RetVT.SimpleTy >= SrcVT.SimpleTy &&
          "Unexpected source/return type pair.");
-  assert((SrcVT == MVT::i8 || SrcVT == MVT::i16 || SrcVT == MVT::i32 ||
-          SrcVT == MVT::i64) && "Unexpected source value type.");
+  assert((SrcVT == MVT::i1 || SrcVT == MVT::i8 || SrcVT == MVT::i16 ||
+          SrcVT == MVT::i32 || SrcVT == MVT::i64) &&
+         "Unexpected source value type.");
   assert((RetVT == MVT::i8 || RetVT == MVT::i16 || RetVT == MVT::i32 ||
           RetVT == MVT::i64) && "Unexpected return value type.");
 
@@ -3992,6 +4048,20 @@ unsigned AArch64FastISel::emitLSR_ri(MVT RetVT, MVT SrcVT, unsigned Op0,
   unsigned RegSize = Is64Bit ? 64 : 32;
   unsigned DstBits = RetVT.getSizeInBits();
   unsigned SrcBits = SrcVT.getSizeInBits();
+  const TargetRegisterClass *RC =
+      Is64Bit ? &AArch64::GPR64RegClass : &AArch64::GPR32RegClass;
+
+  // Just emit a copy for "zero" shifts.
+  if (Shift == 0) {
+    if (RetVT == SrcVT) {
+      unsigned ResultReg = createResultReg(RC);
+      BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
+              TII.get(TargetOpcode::COPY), ResultReg)
+      .addReg(Op0, getKillRegState(Op0IsKill));
+      return ResultReg;
+    } else
+      return emitIntExt(SrcVT, Op0, RetVT, IsZExt);
+  }
 
   // Don't deal with undefined shifts.
   if (Shift >= DstBits)
@@ -4044,8 +4114,6 @@ unsigned AArch64FastISel::emitLSR_ri(MVT RetVT, MVT SrcVT, unsigned Op0,
     {AArch64::UBFMWri, AArch64::UBFMXri}
   };
   unsigned Opc = OpcTable[IsZExt][Is64Bit];
-  const TargetRegisterClass *RC =
-      Is64Bit ? &AArch64::GPR64RegClass : &AArch64::GPR32RegClass;
   if (SrcVT.SimpleTy <= MVT::i32 && RetVT == MVT::i64) {
     unsigned TmpReg = MRI.createVirtualRegister(RC);
     BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
@@ -4091,8 +4159,9 @@ unsigned AArch64FastISel::emitASR_ri(MVT RetVT, MVT SrcVT, unsigned Op0,
                                      bool IsZExt) {
   assert(RetVT.SimpleTy >= SrcVT.SimpleTy &&
          "Unexpected source/return type pair.");
-  assert((SrcVT == MVT::i8 || SrcVT == MVT::i16 || SrcVT == MVT::i32 ||
-          SrcVT == MVT::i64) && "Unexpected source value type.");
+  assert((SrcVT == MVT::i1 || SrcVT == MVT::i8 || SrcVT == MVT::i16 ||
+          SrcVT == MVT::i32 || SrcVT == MVT::i64) &&
+         "Unexpected source value type.");
   assert((RetVT == MVT::i8 || RetVT == MVT::i16 || RetVT == MVT::i32 ||
           RetVT == MVT::i64) && "Unexpected return value type.");
 
@@ -4100,6 +4169,20 @@ unsigned AArch64FastISel::emitASR_ri(MVT RetVT, MVT SrcVT, unsigned Op0,
   unsigned RegSize = Is64Bit ? 64 : 32;
   unsigned DstBits = RetVT.getSizeInBits();
   unsigned SrcBits = SrcVT.getSizeInBits();
+  const TargetRegisterClass *RC =
+      Is64Bit ? &AArch64::GPR64RegClass : &AArch64::GPR32RegClass;
+
+  // Just emit a copy for "zero" shifts.
+  if (Shift == 0) {
+    if (RetVT == SrcVT) {
+      unsigned ResultReg = createResultReg(RC);
+      BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
+              TII.get(TargetOpcode::COPY), ResultReg)
+      .addReg(Op0, getKillRegState(Op0IsKill));
+      return ResultReg;
+    } else
+      return emitIntExt(SrcVT, Op0, RetVT, IsZExt);
+  }
 
   // Don't deal with undefined shifts.
   if (Shift >= DstBits)
@@ -4140,8 +4223,6 @@ unsigned AArch64FastISel::emitASR_ri(MVT RetVT, MVT SrcVT, unsigned Op0,
     {AArch64::UBFMWri, AArch64::UBFMXri}
   };
   unsigned Opc = OpcTable[IsZExt][Is64Bit];
-  const TargetRegisterClass *RC =
-      Is64Bit ? &AArch64::GPR64RegClass : &AArch64::GPR32RegClass;
   if (SrcVT.SimpleTy <= MVT::i32 && RetVT == MVT::i64) {
     unsigned TmpReg = MRI.createVirtualRegister(RC);
     BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
@@ -4372,7 +4453,7 @@ bool AArch64FastISel::selectIntExt(const Instruction *I) {
 }
 
 bool AArch64FastISel::selectRem(const Instruction *I, unsigned ISDOpcode) {
-  EVT DestEVT = TLI.getValueType(I->getType(), true);
+  EVT DestEVT = TLI.getValueType(DL, I->getType(), true);
   if (!DestEVT.isSimple())
     return false;
 
@@ -4502,7 +4583,7 @@ bool AArch64FastISel::selectShift(const Instruction *I) {
     unsigned ResultReg = 0;
     uint64_t ShiftVal = C->getZExtValue();
     MVT SrcVT = RetVT;
-    bool IsZExt = (I->getOpcode() == Instruction::AShr) ? false : true;
+    bool IsZExt = I->getOpcode() != Instruction::AShr;
     const Value *Op0 = I->getOperand(0);
     if (const auto *ZExt = dyn_cast<ZExtInst>(Op0)) {
       if (!isIntExtFree(ZExt)) {
@@ -4649,7 +4730,8 @@ bool AArch64FastISel::selectFRem(const Instruction *I) {
   }
 
   CallLoweringInfo CLI;
-  CLI.setCallee(TLI.getLibcallCallingConv(LC), I->getType(),
+  MCContext &Ctx = MF->getContext();
+  CLI.setCallee(DL, Ctx, TLI.getLibcallCallingConv(LC), I->getType(),
                 TLI.getLibcallName(LC), std::move(Args));
   if (!lowerCallTo(CLI))
     return false;
@@ -4725,6 +4807,28 @@ bool AArch64FastISel::selectSDiv(const Instruction *I) {
   return true;
 }
 
+/// This is mostly a copy of the existing FastISel getRegForGEPIndex code. We
+/// have to duplicate it for AArch64, because otherwise we would fail during the
+/// sign-extend emission.
+std::pair<unsigned, bool> AArch64FastISel::getRegForGEPIndex(const Value *Idx) {
+  unsigned IdxN = getRegForValue(Idx);
+  if (IdxN == 0)
+    // Unhandled operand. Halt "fast" selection and bail.
+    return std::pair<unsigned, bool>(0, false);
+
+  bool IdxNIsKill = hasTrivialKill(Idx);
+
+  // If the index is smaller or larger than intptr_t, truncate or extend it.
+  MVT PtrVT = TLI.getPointerTy(DL);
+  EVT IdxVT = EVT::getEVT(Idx->getType(), /*HandleUnknown=*/false);
+  if (IdxVT.bitsLT(PtrVT)) {
+    IdxN = emitIntExt(IdxVT.getSimpleVT(), IdxN, PtrVT, /*IsZExt=*/false);
+    IdxNIsKill = true;
+  } else if (IdxVT.bitsGT(PtrVT))
+    llvm_unreachable("AArch64 FastISel doesn't support types larger than i64");
+  return std::pair<unsigned, bool>(IdxN, IdxNIsKill);
+}
+
 /// This is mostly a copy of the existing FastISel GEP code, but we have to
 /// duplicate it for AArch64, because otherwise we would bail out even for
 /// simple cases. This is because the standard fastEmit functions don't cover
@@ -4739,7 +4843,7 @@ bool AArch64FastISel::selectGetElementPtr(const Instruction *I) {
   // into a single N = N + TotalOffset.
   uint64_t TotalOffs = 0;
   Type *Ty = I->getOperand(0)->getType();
-  MVT VT = TLI.getPointerTy();
+  MVT VT = TLI.getPointerTy(DL);
   for (auto OI = std::next(I->op_begin()), E = I->op_end(); OI != E; ++OI) {
     const Value *Idx = *OI;
     if (auto *StTy = dyn_cast<StructType>(Ty)) {

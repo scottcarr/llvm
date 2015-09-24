@@ -12,11 +12,11 @@
 #ifndef LLVM_ANALYSIS_REGIONINFOIMPL_H
 #define LLVM_ANALYSIS_REGIONINFOIMPL_H
 
-#include "llvm/Analysis/RegionInfo.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/Analysis/DominanceFrontier.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/RegionInfo.h"
 #include "llvm/Analysis/RegionIterator.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -236,7 +236,7 @@ std::string RegionBase<Tr>::getNameStr() const {
 template <class Tr>
 void RegionBase<Tr>::verifyBBInRegion(BlockT *BB) const {
   if (!contains(BB))
-    llvm_unreachable("Broken region found!");
+    llvm_unreachable("Broken region found: enumerated BB not in region!");
 
   BlockT *entry = getEntry(), *exit = getExit();
 
@@ -244,7 +244,8 @@ void RegionBase<Tr>::verifyBBInRegion(BlockT *BB) const {
                   SE = BlockTraits::child_end(BB);
        SI != SE; ++SI) {
     if (!contains(*SI) && exit != *SI)
-      llvm_unreachable("Broken region found!");
+      llvm_unreachable("Broken region found: edges leaving the region must go "
+                       "to the exit node!");
   }
 
   if (entry != BB) {
@@ -252,7 +253,8 @@ void RegionBase<Tr>::verifyBBInRegion(BlockT *BB) const {
                     SE = InvBlockTraits::child_end(BB);
          SI != SE; ++SI) {
       if (!contains(*SI))
-        llvm_unreachable("Broken region found!");
+        llvm_unreachable("Broken region found: edges entering the region must "
+                         "go to the entry node!");
     }
   }
 }
@@ -487,7 +489,7 @@ void RegionBase<Tr>::print(raw_ostream &OS, bool print_tree, unsigned level,
     OS.indent(level * 2 + 2);
 
     if (Style == PrintBB) {
-      for (const auto &BB : blocks())
+      for (const auto *BB : blocks())
         OS << BB->getName() << ", "; // TODO: remove the last ","
     } else if (Style == PrintRN) {
       for (const_element_iterator I = element_begin(), E = element_end();
@@ -539,6 +541,21 @@ RegionInfoBase<Tr>::RegionInfoBase()
 template <class Tr>
 RegionInfoBase<Tr>::~RegionInfoBase() {
   releaseMemory();
+}
+
+template <class Tr>
+void RegionInfoBase<Tr>::verifyBBMap(const RegionT *R) const {
+  assert(R && "Re must be non-null");
+  for (auto I = R->element_begin(), E = R->element_end(); I != E; ++I) {
+    if (I->isSubRegion()) {
+      const RegionT *SR = I->template getNodeAs<RegionT>();
+      verifyBBMap(SR);
+    } else {
+      BlockT *BB = I->template getNodeAs<BlockT>();
+      if (getRegionFor(BB) != R)
+        llvm_unreachable("BB map does not match region nesting");
+    }
+  }
 }
 
 template <class Tr>
@@ -714,10 +731,8 @@ void RegionInfoBase<Tr>::scanForRegions(FuncT &F, BBtoBBMap *ShortCut) {
   // regions from the bottom of the dominance tree.  If the small regions are
   // detected first, detection of bigger regions is faster, as we can jump
   // over the small regions.
-  for (po_iterator<DomTreeNodeT *> FI = po_begin(N), FE = po_end(N); FI != FE;
-       ++FI) {
-    findRegionsWithEntry(FI->getBlock(), ShortCut);
-  }
+  for (auto DomNode : post_order(N))
+    findRegionsWithEntry(DomNode->getBlock(), ShortCut);
 }
 
 template <class Tr>
@@ -788,7 +803,14 @@ void RegionInfoBase<Tr>::releaseMemory() {
 
 template <class Tr>
 void RegionInfoBase<Tr>::verifyAnalysis() const {
+  // Do only verify regions if explicitely activated using XDEBUG or
+  // -verify-region-info
+  if (!RegionInfoBase<Tr>::VerifyRegionInfo)
+    return;
+
   TopLevelRegion->verifyRegionNest();
+
+  verifyBBMap(TopLevelRegion);
 }
 
 // Region pass manager support.
@@ -886,20 +908,6 @@ RegionInfoBase<Tr>::getCommonRegion(SmallVectorImpl<BlockT *> &BBs) const {
     ret = getCommonRegion(ret, getRegionFor(BB));
 
   return ret;
-}
-
-template <class Tr>
-void RegionInfoBase<Tr>::splitBlock(BlockT *NewBB, BlockT *OldBB) {
-  RegionT *R = getRegionFor(OldBB);
-
-  setRegionFor(NewBB, R);
-
-  while (R->getEntry() == OldBB && !R->isTopLevelRegion()) {
-    R->replaceEntry(NewBB);
-    R = R->getParent();
-  }
-
-  setRegionFor(OldBB, R);
 }
 
 template <class Tr>

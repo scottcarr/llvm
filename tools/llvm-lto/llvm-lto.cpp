@@ -22,13 +22,23 @@
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/raw_ostream.h"
+#include <list>
 
 using namespace llvm;
 
-static cl::opt<bool>
-DisableOpt("disable-opt", cl::init(false),
-  cl::desc("Do not run any optimization passes"));
+static cl::opt<char>
+OptLevel("O",
+         cl::desc("Optimization level. [-O0, -O1, -O2, or -O3] "
+                  "(default = '-O2')"),
+         cl::Prefix,
+         cl::ZeroOrMore,
+         cl::init('2'));
+
+static cl::opt<bool> DisableVerify(
+    "disable-verify", cl::init(false),
+    cl::desc("Do not run the verifier during the optimization pipeline"));
 
 static cl::opt<bool>
 DisableInline("disable-inlining", cl::init(false),
@@ -65,14 +75,25 @@ DSOSymbols("dso-symbol",
   cl::desc("Symbol to put in the symtab in the resulting dso"),
   cl::ZeroOrMore);
 
+static cl::opt<bool> ListSymbolsOnly(
+    "list-symbols-only", cl::init(false),
+    cl::desc("Instead of running LTO, list the symbols in each IR file"));
+
+static cl::opt<bool> SetMergedModule(
+    "set-merged-module", cl::init(false),
+    cl::desc("Use the first input module as the merged module"));
+
+static cl::opt<unsigned> Parallelism("j", cl::Prefix, cl::init(1),
+                                     cl::desc("Number of backend threads"));
+
 namespace {
 struct ModuleInfo {
   std::vector<bool> CanBeHidden;
 };
 }
 
-void handleDiagnostics(lto_codegen_diagnostic_severity_t Severity,
-                       const char *Msg, void *) {
+static void handleDiagnostics(lto_codegen_diagnostic_severity_t Severity,
+                              const char *Msg, void *) {
   switch (Severity) {
   case LTO_DS_NOTE:
     errs() << "note: ";
@@ -90,6 +111,46 @@ void handleDiagnostics(lto_codegen_diagnostic_severity_t Severity,
   errs() << Msg << "\n";
 }
 
+static std::unique_ptr<LTOModule>
+getLocalLTOModule(StringRef Path, std::unique_ptr<MemoryBuffer> &Buffer,
+                  const TargetOptions &Options, std::string &Error) {
+  ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrErr =
+      MemoryBuffer::getFile(Path);
+  if (std::error_code EC = BufferOrErr.getError()) {
+    Error = EC.message();
+    return nullptr;
+  }
+  Buffer = std::move(BufferOrErr.get());
+  return std::unique_ptr<LTOModule>(LTOModule::createInLocalContext(
+      Buffer->getBufferStart(), Buffer->getBufferSize(), Options, Error, Path));
+}
+
+/// \brief List symbols in each IR file.
+///
+/// The main point here is to provide lit-testable coverage for the LTOModule
+/// functionality that's exposed by the C API to list symbols.  Moreover, this
+/// provides testing coverage for modules that have been created in their own
+/// contexts.
+static int listSymbols(StringRef Command, const TargetOptions &Options) {
+  for (auto &Filename : InputFilenames) {
+    std::string Error;
+    std::unique_ptr<MemoryBuffer> Buffer;
+    std::unique_ptr<LTOModule> Module =
+        getLocalLTOModule(Filename, Buffer, Options, Error);
+    if (!Module) {
+      errs() << Command << ": error loading file '" << Filename
+             << "': " << Error << "\n";
+      return 1;
+    }
+
+    // List the symbols.
+    outs() << Filename << ":\n";
+    for (int I = 0, E = Module->getSymbolCount(); I != E; ++I)
+      outs() << Module->getSymbolName(I) << "\n";
+  }
+  return 0;
+}
+
 int main(int argc, char **argv) {
   // Print a stack trace if we signal out.
   sys::PrintStackTraceOnErrorSignal();
@@ -97,6 +158,11 @@ int main(int argc, char **argv) {
 
   llvm_shutdown_obj Y; // Call llvm_shutdown() on exit.
   cl::ParseCommandLineOptions(argc, argv, "llvm LTO linker\n");
+
+  if (OptLevel < '0' || OptLevel > '3') {
+    errs() << argv[0] << ": optimization level must be between 0 and 3\n";
+    return 1;
+  }
 
   // Initialize the configured targets.
   InitializeAllTargets();
@@ -107,6 +173,9 @@ int main(int argc, char **argv) {
   // set up the TargetOptions for the machine
   TargetOptions Options = InitTargetOptionsFromCodeGenFlags();
 
+  if (ListSymbolsOnly)
+    return listSymbols(argv[0], Options);
+
   unsigned BaseArg = 0;
 
   LTOCodeGenerator CodeGen;
@@ -114,19 +183,7 @@ int main(int argc, char **argv) {
   if (UseDiagnosticHandler)
     CodeGen.setDiagnosticHandler(handleDiagnostics, nullptr);
 
-  switch (RelocModel) {
-  case Reloc::Static:
-    CodeGen.setCodePICModel(LTO_CODEGEN_PIC_MODEL_STATIC);
-    break;
-  case Reloc::PIC_:
-    CodeGen.setCodePICModel(LTO_CODEGEN_PIC_MODEL_DYNAMIC);
-    break;
-  case Reloc::DynamicNoPIC:
-    CodeGen.setCodePICModel(LTO_CODEGEN_PIC_MODEL_DYNAMIC_NO_PIC);
-    break;
-  default:
-    CodeGen.setCodePICModel(LTO_CODEGEN_PIC_MODEL_DEFAULT);
-  }
+  CodeGen.setCodePICModel(RelocModel);
 
   CodeGen.setDebugInfo(LTO_DEBUG_MODEL_DWARF);
   CodeGen.setTargetOptions(Options);
@@ -147,9 +204,6 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    if (!CodeGen.addModule(Module.get()))
-      return 1;
-
     unsigned NumSyms = Module->getSymbolCount();
     for (unsigned I = 0; I < NumSyms; ++I) {
       StringRef Name = Module->getSymbolName(I);
@@ -160,6 +214,17 @@ int main(int argc, char **argv) {
       if (Scope != LTO_SYMBOL_SCOPE_DEFAULT_CAN_BE_HIDDEN)
         KeptDSOSyms.push_back(Name);
     }
+
+    // We use the first input module as the destination module when
+    // SetMergedModule is true.
+    if (SetMergedModule && i == BaseArg) {
+      // Transfer ownership to the code generator.
+      CodeGen.setModule(std::move(Module));
+    } else if (!CodeGen.addModule(Module.get())) {
+      // Print a message here so that we know addModule() did not abort.
+      errs() << argv[0] << ": error adding file '" << InputFilenames[i] << "'\n";
+      return 1;
+    }
   }
 
   // Add all the exported symbols to the table of symbols to preserve.
@@ -169,6 +234,11 @@ int main(int argc, char **argv) {
   // Add all the dso symbols to the table of symbols to expose.
   for (unsigned i = 0; i < KeptDSOSyms.size(); ++i)
     CodeGen.addMustPreserveSymbol(KeptDSOSyms[i].c_str());
+
+  // Set cpu and attrs strings for the default target/subtarget.
+  CodeGen.setCpu(MCPU.c_str());
+
+  CodeGen.setOptLevel(OptLevel - '0');
 
   std::string attrs;
   for (unsigned i = 0; i < MAttrs.size(); ++i) {
@@ -181,30 +251,45 @@ int main(int argc, char **argv) {
     CodeGen.setAttr(attrs.c_str());
 
   if (!OutputFilename.empty()) {
-    size_t len = 0;
     std::string ErrorInfo;
-    const void *Code =
-        CodeGen.compile(&len, DisableOpt, DisableInline, DisableGVNLoadPRE,
-                        DisableLTOVectorization, ErrorInfo);
-    if (!Code) {
-      errs() << argv[0]
-             << ": error compiling the code: " << ErrorInfo << "\n";
+    if (!CodeGen.optimize(DisableVerify, DisableInline, DisableGVNLoadPRE,
+                          DisableLTOVectorization, ErrorInfo)) {
+      errs() << argv[0] << ": error optimizing the code: " << ErrorInfo << "\n";
       return 1;
     }
 
-    std::error_code EC;
-    raw_fd_ostream FileStream(OutputFilename, EC, sys::fs::F_None);
-    if (EC) {
-      errs() << argv[0] << ": error opening the file '" << OutputFilename
-             << "': " << EC.message() << "\n";
+    std::list<tool_output_file> OSs;
+    std::vector<raw_pwrite_stream *> OSPtrs;
+    for (unsigned I = 0; I != Parallelism; ++I) {
+      std::string PartFilename = OutputFilename;
+      if (Parallelism != 1)
+        PartFilename += "." + utostr(I);
+      std::error_code EC;
+      OSs.emplace_back(PartFilename, EC, sys::fs::F_None);
+      if (EC) {
+        errs() << argv[0] << ": error opening the file '" << PartFilename
+               << "': " << EC.message() << "\n";
+        return 1;
+      }
+      OSPtrs.push_back(&OSs.back().os());
+    }
+
+    if (!CodeGen.compileOptimized(OSPtrs, ErrorInfo)) {
+      errs() << argv[0] << ": error compiling the code: " << ErrorInfo << "\n";
       return 1;
     }
 
-    FileStream.write(reinterpret_cast<const char *>(Code), len);
+    for (tool_output_file &OS : OSs)
+      OS.keep();
   } else {
+    if (Parallelism != 1) {
+      errs() << argv[0] << ": -j must be specified together with -o\n";
+      return 1;
+    }
+
     std::string ErrorInfo;
     const char *OutputName = nullptr;
-    if (!CodeGen.compile_to_file(&OutputName, DisableOpt, DisableInline,
+    if (!CodeGen.compile_to_file(&OutputName, DisableVerify, DisableInline,
                                  DisableGVNLoadPRE, DisableLTOVectorization,
                                  ErrorInfo)) {
       errs() << argv[0]

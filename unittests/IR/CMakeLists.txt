@@ -2,7 +2,6 @@ set(LLVM_LINK_COMPONENTS
   Analysis
   AsmParser
   Core
-  IPA
   Support
   )
 
@@ -14,7 +13,6 @@ set(IRSources
   DominatorTreeTest.cpp
   IRBuilderTest.cpp
   InstructionsTest.cpp
-  LeakDetectorTest.cpp
   LegacyPassManagerTest.cpp
   MDBuilderTest.cpp
   MetadataTest.cpp

@@ -27,6 +27,8 @@ set(ADTSources
   PackedVectorTest.cpp
   PointerIntPairTest.cpp
   PointerUnionTest.cpp
+  PostOrderIteratorTest.cpp
+  RangeAdapterTest.cpp
   SCCIteratorTest.cpp
   SmallPtrSetTest.cpp
   SmallStringTest.cpp
@@ -45,3 +47,5 @@ set(ADTSources
 add_llvm_unittest(ADTTests
   ${ADTSources}
   )
+
+add_dependencies(ADTTests intrinsics_gen)

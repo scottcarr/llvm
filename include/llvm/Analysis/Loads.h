@@ -14,11 +14,11 @@
 #ifndef LLVM_ANALYSIS_LOADS_H
 #define LLVM_ANALYSIS_LOADS_H
 
+#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/IR/BasicBlock.h"
 
 namespace llvm {
 
-class AliasAnalysis;
 class DataLayout;
 class MDNode;
 
@@ -27,8 +27,7 @@ class MDNode;
 /// specified pointer, we do a quick local scan of the basic block containing
 /// ScanFrom, to determine if the address is already accessed.
 bool isSafeToLoadUnconditionally(Value *V, Instruction *ScanFrom,
-                                 unsigned Align,
-                                 const DataLayout *TD = nullptr);
+                                 unsigned Align);
 
 /// FindAvailableLoadedValue - Scan the ScanBB block backwards (starting at
 /// the instruction before ScanFrom) checking to see if we have the value at

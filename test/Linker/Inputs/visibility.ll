@@ -4,12 +4,12 @@ $c1 = comdat any
 @v1 = weak hidden global i32 0
 @v2 = weak protected global i32 0
 @v3 = weak hidden global i32 0
-@v4 = hidden global i32 1, comdat $c1
+@v4 = hidden global i32 1, comdat($c1)
 
 ; Aliases
-@a1 = weak hidden alias i32* @v1
-@a2 = weak protected alias i32* @v2
-@a3 = weak hidden alias i32* @v3
+@a1 = weak hidden alias i32, i32* @v1
+@a2 = weak protected alias i32, i32* @v2
+@a3 = weak hidden alias i32, i32* @v3
 
 ; Functions
 define weak hidden void @f1() {

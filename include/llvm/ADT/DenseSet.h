@@ -18,14 +18,31 @@
 
 namespace llvm {
 
+namespace detail {
+struct DenseSetEmpty {};
+
+// Use the empty base class trick so we can create a DenseMap where the buckets
+// contain only a single item.
+template <typename KeyT> class DenseSetPair : public DenseSetEmpty {
+  KeyT key;
+
+public:
+  KeyT &getFirst() { return key; }
+  const KeyT &getFirst() const { return key; }
+  DenseSetEmpty &getSecond() { return *this; }
+  const DenseSetEmpty &getSecond() const { return *this; }
+};
+}
+
 /// DenseSet - This implements a dense probed hash-table based set.
-///
-/// FIXME: This is currently implemented directly in terms of DenseMap, this
-/// should be optimized later if there is a need.
 template<typename ValueT, typename ValueInfoT = DenseMapInfo<ValueT> >
 class DenseSet {
-  typedef DenseMap<ValueT, char, ValueInfoT> MapTy;
+  typedef DenseMap<ValueT, detail::DenseSetEmpty, ValueInfoT,
+                   detail::DenseSetPair<ValueT>> MapTy;
+  static_assert(sizeof(typename MapTy::value_type) == sizeof(ValueT),
+                "DenseMap buckets unexpectedly large!");
   MapTy TheMap;
+
 public:
   typedef ValueT key_type;
   typedef ValueT value_type;
@@ -63,6 +80,7 @@ public:
   class Iterator {
     typename MapTy::iterator I;
     friend class DenseSet;
+
   public:
     typedef typename MapTy::iterator::difference_type difference_type;
     typedef ValueT value_type;
@@ -72,8 +90,8 @@ public:
 
     Iterator(const typename MapTy::iterator &i) : I(i) {}
 
-    ValueT& operator*() { return I->first; }
-    ValueT* operator->() { return &I->first; }
+    ValueT &operator*() { return I->getFirst(); }
+    ValueT *operator->() { return &I->getFirst(); }
 
     Iterator& operator++() { ++I; return *this; }
     bool operator==(const Iterator& X) const { return I == X.I; }
@@ -83,6 +101,7 @@ public:
   class ConstIterator {
     typename MapTy::const_iterator I;
     friend class DenseSet;
+
   public:
     typedef typename MapTy::const_iterator::difference_type difference_type;
     typedef ValueT value_type;
@@ -92,8 +111,8 @@ public:
 
     ConstIterator(const typename MapTy::const_iterator &i) : I(i) {}
 
-    const ValueT& operator*() { return I->first; }
-    const ValueT* operator->() { return &I->first; }
+    const ValueT &operator*() { return I->getFirst(); }
+    const ValueT *operator->() { return &I->getFirst(); }
 
     ConstIterator& operator++() { ++I; return *this; }
     bool operator==(const ConstIterator& X) const { return I == X.I; }
@@ -129,9 +148,10 @@ public:
   void erase(ConstIterator CI) { return TheMap.erase(CI.I); }
 
   std::pair<iterator, bool> insert(const ValueT &V) {
-    return TheMap.insert(std::make_pair(V, 0));
+    detail::DenseSetEmpty Empty;
+    return TheMap.insert(std::make_pair(V, Empty));
   }
-  
+
   // Range insertion of values.
   template<typename InputIt>
   void insert(InputIt I, InputIt E) {

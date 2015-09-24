@@ -27,7 +27,7 @@ using namespace llvm;
 MipsSEInstrInfo::MipsSEInstrInfo(const MipsSubtarget &STI)
     : MipsInstrInfo(STI, STI.getRelocationModel() == Reloc::PIC_ ? Mips::B
                                                                  : Mips::J),
-      RI(STI), IsN64(STI.isABI_N64()) {}
+      RI() {}
 
 const MipsRegisterInfo &MipsSEInstrInfo::getRegisterInfo() const {
   return RI;
@@ -38,9 +38,8 @@ const MipsRegisterInfo &MipsSEInstrInfo::getRegisterInfo() const {
 /// the destination along with the FrameIndex of the loaded stack slot.  If
 /// not, return 0.  This predicate must return 0 if the instruction has
 /// any side effects other than loading from the stack slot.
-unsigned MipsSEInstrInfo::
-isLoadFromStackSlot(const MachineInstr *MI, int &FrameIndex) const
-{
+unsigned MipsSEInstrInfo::isLoadFromStackSlot(const MachineInstr *MI,
+                                              int &FrameIndex) const {
   unsigned Opc = MI->getOpcode();
 
   if ((Opc == Mips::LW)   || (Opc == Mips::LD)   ||
@@ -61,9 +60,8 @@ isLoadFromStackSlot(const MachineInstr *MI, int &FrameIndex) const
 /// the source reg along with the FrameIndex of the loaded stack slot.  If
 /// not, return 0.  This predicate must return 0 if the instruction has
 /// any side effects other than storing to the stack slot.
-unsigned MipsSEInstrInfo::
-isStoreToStackSlot(const MachineInstr *MI, int &FrameIndex) const
-{
+unsigned MipsSEInstrInfo::isStoreToStackSlot(const MachineInstr *MI,
+                                             int &FrameIndex) const {
   unsigned Opc = MI->getOpcode();
 
   if ((Opc == Mips::SW)   || (Opc == Mips::SD)   ||
@@ -90,7 +88,7 @@ void MipsSEInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
       if (isMicroMips)
         Opc = Mips::MOVE16_MM;
       else
-        Opc = Mips::ADDu, ZeroReg = Mips::ZERO;
+        Opc = Mips::OR, ZeroReg = Mips::ZERO;
     } else if (Mips::CCRRegClass.contains(SrcReg))
       Opc = Mips::CFC1;
     else if (Mips::FGR32RegClass.contains(SrcReg))
@@ -143,7 +141,7 @@ void MipsSEInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     Opc = Mips::FMOV_D64;
   else if (Mips::GPR64RegClass.contains(DestReg)) { // Copy to CPU64 Reg.
     if (Mips::GPR64RegClass.contains(SrcReg))
-      Opc = Mips::DADDu, ZeroReg = Mips::ZERO_64;
+      Opc = Mips::OR64, ZeroReg = Mips::ZERO_64;
     else if (Mips::HI64RegClass.contains(SrcReg))
       Opc = Mips::MFHI64, SrcReg = 0;
     else if (Mips::LO64RegClass.contains(SrcReg))
@@ -184,7 +182,6 @@ storeRegToStack(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
                 const TargetRegisterClass *RC, const TargetRegisterInfo *TRI,
                 int64_t Offset) const {
   DebugLoc DL;
-  if (I != MBB.end()) DL = I->getDebugLoc();
   MachineMemOperand *MMO = GetMemOperand(MBB, FI, MachineMemOperand::MOStore);
 
   unsigned Opc = 0;
@@ -352,6 +349,8 @@ unsigned MipsSEInstrInfo::getOppositeBranchOpc(unsigned Opc) const {
   case Mips::BLEZ64: return Mips::BGTZ64;
   case Mips::BC1T:   return Mips::BC1F;
   case Mips::BC1F:   return Mips::BC1T;
+  case Mips::BEQZC_MM: return Mips::BNEZC_MM;
+  case Mips::BNEZC_MM: return Mips::BEQZC_MM;
   }
 }
 
@@ -359,10 +358,13 @@ unsigned MipsSEInstrInfo::getOppositeBranchOpc(unsigned Opc) const {
 void MipsSEInstrInfo::adjustStackPtr(unsigned SP, int64_t Amount,
                                      MachineBasicBlock &MBB,
                                      MachineBasicBlock::iterator I) const {
-  const MipsSubtarget &STI = Subtarget;
-  DebugLoc DL = I != MBB.end() ? I->getDebugLoc() : DebugLoc();
-  unsigned ADDu = STI.isABI_N64() ? Mips::DADDu : Mips::ADDu;
-  unsigned ADDiu = STI.isABI_N64() ? Mips::DADDiu : Mips::ADDiu;
+  MipsABIInfo ABI = Subtarget.getABI();
+  DebugLoc DL;
+  unsigned ADDu = ABI.GetPtrAdduOp();
+  unsigned ADDiu = ABI.GetPtrAddiuOp();
+
+  if (Amount == 0)
+    return;
 
   if (isInt<16>(Amount))// addi sp, sp, amount
     BuildMI(MBB, I, DL, get(ADDiu), SP).addReg(SP).addImm(Amount);
@@ -422,7 +424,7 @@ unsigned MipsSEInstrInfo::getAnalyzableBrOpc(unsigned Opc) const {
           Opc == Mips::BEQ64  || Opc == Mips::BNE64  || Opc == Mips::BGTZ64 ||
           Opc == Mips::BGEZ64 || Opc == Mips::BLTZ64 || Opc == Mips::BLEZ64 ||
           Opc == Mips::BC1T   || Opc == Mips::BC1F   || Opc == Mips::B      ||
-          Opc == Mips::J) ?
+          Opc == Mips::J || Opc == Mips::BEQZC_MM || Opc == Mips::BNEZC_MM) ?
          Opc : 0;
 }
 
@@ -607,7 +609,8 @@ void MipsSEInstrInfo::expandEhReturn(MachineBasicBlock &MBB,
   // This pseudo instruction is generated as part of the lowering of
   // ISD::EH_RETURN. We convert it to a stack increment by OffsetReg, and
   // indirect jump to TargetReg
-  unsigned ADDU = Subtarget.isABI_N64() ? Mips::DADDu : Mips::ADDu;
+  MipsABIInfo ABI = Subtarget.getABI();
+  unsigned ADDU = ABI.GetPtrAdduOp();
   unsigned SP = Subtarget.isGP64bit() ? Mips::SP_64 : Mips::SP;
   unsigned RA = Subtarget.isGP64bit() ? Mips::RA_64 : Mips::RA;
   unsigned T9 = Subtarget.isGP64bit() ? Mips::T9_64 : Mips::T9;
@@ -620,18 +623,13 @@ void MipsSEInstrInfo::expandEhReturn(MachineBasicBlock &MBB,
   // jr   $ra (via RetRA)
   const TargetMachine &TM = MBB.getParent()->getTarget();
   if (TM.getRelocationModel() == Reloc::PIC_)
-    BuildMI(MBB, I, I->getDebugLoc(),
-            TM.getSubtargetImpl()->getInstrInfo()->get(ADDU), T9)
+    BuildMI(MBB, I, I->getDebugLoc(), get(ADDU), T9)
         .addReg(TargetReg)
         .addReg(ZERO);
-  BuildMI(MBB, I, I->getDebugLoc(),
-          TM.getSubtargetImpl()->getInstrInfo()->get(ADDU), RA)
+  BuildMI(MBB, I, I->getDebugLoc(), get(ADDU), RA)
       .addReg(TargetReg)
       .addReg(ZERO);
-  BuildMI(MBB, I, I->getDebugLoc(),
-          TM.getSubtargetImpl()->getInstrInfo()->get(ADDU), SP)
-      .addReg(SP)
-      .addReg(OffsetReg);
+  BuildMI(MBB, I, I->getDebugLoc(), get(ADDU), SP).addReg(SP).addReg(OffsetReg);
   expandRetRA(MBB, I);
 }
 

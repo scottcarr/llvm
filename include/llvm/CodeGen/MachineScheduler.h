@@ -77,10 +77,10 @@
 #ifndef LLVM_CODEGEN_MACHINESCHEDULER_H
 #define LLVM_CODEGEN_MACHINESCHEDULER_H
 
+#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/CodeGen/MachinePassRegistry.h"
 #include "llvm/CodeGen/RegisterPressure.h"
 #include "llvm/CodeGen/ScheduleDAGInstrs.h"
-
 #include <memory>
 
 namespace llvm {
@@ -88,7 +88,6 @@ namespace llvm {
 extern cl::opt<bool> ForceTopDown;
 extern cl::opt<bool> ForceBottomUp;
 
-class AliasAnalysis;
 class LiveIntervals;
 class MachineDominatorTree;
 class MachineLoopInfo;
@@ -386,7 +385,7 @@ public:
         ShouldTrackPressure(false), RPTracker(RegPressure),
         TopRPTracker(TopPressure), BotRPTracker(BotPressure) {}
 
-  virtual ~ScheduleDAGMILive();
+  ~ScheduleDAGMILive() override;
 
   /// Return true if this DAG supports VReg liveness and RegPressure.
   bool hasVRegLiveness() const override { return true; }
@@ -910,13 +909,13 @@ public:
   PostGenericScheduler(const MachineSchedContext *C):
     GenericSchedulerBase(C), Top(SchedBoundary::TopQID, "TopQ") {}
 
-  virtual ~PostGenericScheduler() {}
+  ~PostGenericScheduler() override {}
 
   void initPolicy(MachineBasicBlock::iterator Begin,
                   MachineBasicBlock::iterator End,
                   unsigned NumRegionInstrs) override {
     /* no configurable policy */
-  };
+  }
 
   /// PostRA scheduling does not track pressure.
   bool shouldTrackPressure() const override { return false; }

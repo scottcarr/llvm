@@ -1,4 +1,4 @@
-//===- LazyValueInfo.cpp - Value constraint analysis ----------------------===//
+//===- LazyValueInfo.cpp - Value constraint analysis ------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -15,8 +15,9 @@
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Analysis/AssumptionTracker.h"
+#include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/ConstantFolding.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/ConstantRange.h"
@@ -29,7 +30,6 @@
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetLibraryInfo.h"
 #include <map>
 #include <stack>
 using namespace llvm;
@@ -40,8 +40,8 @@ using namespace PatternMatch;
 char LazyValueInfo::ID = 0;
 INITIALIZE_PASS_BEGIN(LazyValueInfo, "lazy-value-info",
                 "Lazy Value Information Analysis", false, true)
-INITIALIZE_PASS_DEPENDENCY(AssumptionTracker)
-INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfo)
+INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
+INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_END(LazyValueInfo, "lazy-value-info",
                 "Lazy Value Information Analysis", false, true)
 
@@ -54,8 +54,7 @@ namespace llvm {
 //                               LVILatticeVal
 //===----------------------------------------------------------------------===//
 
-/// LVILatticeVal - This is the information tracked by LazyValueInfo for each
-/// value.
+/// This is the information tracked by LazyValueInfo for each value.
 ///
 /// FIXME: This is basically just for bringup, this can be made a lot more rich
 /// in the future.
@@ -63,28 +62,28 @@ namespace llvm {
 namespace {
 class LVILatticeVal {
   enum LatticeValueTy {
-    /// undefined - This Value has no known value yet.
+    /// This Value has no known value yet.
     undefined,
-    
-    /// constant - This Value has a specific constant value.
+
+    /// This Value has a specific constant value.
     constant,
-    /// notconstant - This Value is known to not have the specified value.
+
+    /// This Value is known to not have the specified value.
     notconstant,
 
-    /// constantrange - The Value falls within this range.
+    /// The Value falls within this range.
     constantrange,
 
-    /// overdefined - This value is not known to be constant, and we know that
-    /// it has a value.
+    /// This value is not known to be constant, and we know that it has a value.
     overdefined
   };
-  
+
   /// Val: This stores the current lattice value along with the Constant* for
   /// the constant if this is a 'constant' or 'notconstant' value.
   LatticeValueTy Tag;
   Constant *Val;
   ConstantRange Range;
-  
+
 public:
   LVILatticeVal() : Tag(undefined), Val(nullptr), Range(1, true) {}
 
@@ -105,30 +104,30 @@ public:
     Res.markConstantRange(CR);
     return Res;
   }
-  
+
   bool isUndefined() const     { return Tag == undefined; }
   bool isConstant() const      { return Tag == constant; }
   bool isNotConstant() const   { return Tag == notconstant; }
   bool isConstantRange() const { return Tag == constantrange; }
   bool isOverdefined() const   { return Tag == overdefined; }
-  
+
   Constant *getConstant() const {
     assert(isConstant() && "Cannot get the constant of a non-constant!");
     return Val;
   }
-  
+
   Constant *getNotConstant() const {
     assert(isNotConstant() && "Cannot get the constant of a non-notconstant!");
     return Val;
   }
-  
+
   ConstantRange getConstantRange() const {
     assert(isConstantRange() &&
            "Cannot get the constant-range of a non-constant-range!");
     return Range;
   }
-  
-  /// markOverdefined - Return true if this is a change in status.
+
+  /// Return true if this is a change in status.
   bool markOverdefined() {
     if (isOverdefined())
       return false;
@@ -136,7 +135,7 @@ public:
     return true;
   }
 
-  /// markConstant - Return true if this is a change in status.
+  /// Return true if this is a change in status.
   bool markConstant(Constant *V) {
     assert(V && "Marking constant with NULL");
     if (ConstantInt *CI = dyn_cast<ConstantInt>(V))
@@ -151,8 +150,8 @@ public:
     Val = V;
     return true;
   }
-  
-  /// markNotConstant - Return true if this is a change in status.
+
+  /// Return true if this is a change in status.
   bool markNotConstant(Constant *V) {
     assert(V && "Marking constant with NULL");
     if (ConstantInt *CI = dyn_cast<ConstantInt>(V))
@@ -169,30 +168,30 @@ public:
     Val = V;
     return true;
   }
-  
-  /// markConstantRange - Return true if this is a change in status.
+
+  /// Return true if this is a change in status.
   bool markConstantRange(const ConstantRange NewR) {
     if (isConstantRange()) {
       if (NewR.isEmptySet())
         return markOverdefined();
-      
+
       bool changed = Range != NewR;
       Range = NewR;
       return changed;
     }
-    
+
     assert(isUndefined());
     if (NewR.isEmptySet())
       return markOverdefined();
-    
+
     Tag = constantrange;
     Range = NewR;
     return true;
   }
-  
-  /// mergeIn - Merge the specified lattice value into this one, updating this
+
+  /// Merge the specified lattice value into this one, updating this
   /// one and returning true if anything changed.
-  bool mergeIn(const LVILatticeVal &RHS) {
+  bool mergeIn(const LVILatticeVal &RHS, const DataLayout &DL) {
     if (RHS.isUndefined() || isOverdefined()) return false;
     if (RHS.isOverdefined()) return markOverdefined();
 
@@ -216,11 +215,9 @@ public:
 
         // Unless we can prove that the two Constants are different, we must
         // move to overdefined.
-        // FIXME: use DataLayout/TargetLibraryInfo for smarter constant folding.
-        if (ConstantInt *Res = dyn_cast<ConstantInt>(
-                ConstantFoldCompareInstOperands(CmpInst::ICMP_NE,
-                                                getConstant(),
-                                                RHS.getNotConstant())))
+        if (ConstantInt *Res =
+                dyn_cast<ConstantInt>(ConstantFoldCompareInstOperands(
+                    CmpInst::ICMP_NE, getConstant(), RHS.getNotConstant(), DL)))
           if (Res->isOne())
             return markNotConstant(RHS.getNotConstant());
 
@@ -242,11 +239,9 @@ public:
 
         // Unless we can prove that the two Constants are different, we must
         // move to overdefined.
-        // FIXME: use DataLayout/TargetLibraryInfo for smarter constant folding.
-        if (ConstantInt *Res = dyn_cast<ConstantInt>(
-                ConstantFoldCompareInstOperands(CmpInst::ICMP_NE,
-                                                getNotConstant(),
-                                                RHS.getConstant())))
+        if (ConstantInt *Res =
+                dyn_cast<ConstantInt>(ConstantFoldCompareInstOperands(
+                    CmpInst::ICMP_NE, getNotConstant(), RHS.getConstant(), DL)))
           if (Res->isOne())
             return false;
 
@@ -272,7 +267,7 @@ public:
     return markConstantRange(NewR);
   }
 };
-  
+
 } // end anonymous namespace.
 
 namespace llvm {
@@ -298,12 +293,11 @@ raw_ostream &operator<<(raw_ostream &OS, const LVILatticeVal &Val) {
 //===----------------------------------------------------------------------===//
 
 namespace {
-  /// LVIValueHandle - A callback value handle updates the cache when
-  /// values are erased.
+  /// A callback value handle updates the cache when values are erased.
   class LazyValueInfoCache;
-  struct LVIValueHandle : public CallbackVH {
+  struct LVIValueHandle final : public CallbackVH {
     LazyValueInfoCache *Parent;
-      
+
     LVIValueHandle(Value *V, LazyValueInfoCache *P)
       : CallbackVH(V), Parent(P) { }
 
@@ -314,63 +308,61 @@ namespace {
   };
 }
 
-namespace { 
-  /// LazyValueInfoCache - This is the cache kept by LazyValueInfo which
+namespace {
+  /// This is the cache kept by LazyValueInfo which
   /// maintains information about queries across the clients' queries.
   class LazyValueInfoCache {
-    /// ValueCacheEntryTy - This is all of the cached block information for
-    /// exactly one Value*.  The entries are sorted by the BasicBlock* of the
+    /// This is all of the cached block information for exactly one Value*.
+    /// The entries are sorted by the BasicBlock* of the
     /// entries, allowing us to do a lookup with a binary search.
-    typedef std::map<AssertingVH<BasicBlock>, LVILatticeVal> ValueCacheEntryTy;
+    typedef SmallDenseMap<AssertingVH<BasicBlock>, LVILatticeVal, 4>
+        ValueCacheEntryTy;
 
-    /// ValueCache - This is all of the cached information for all values,
+    /// This is all of the cached information for all values,
     /// mapped from Value* to key information.
     std::map<LVIValueHandle, ValueCacheEntryTy> ValueCache;
-    
-    /// OverDefinedCache - This tracks, on a per-block basis, the set of 
-    /// values that are over-defined at the end of that block.  This is required
-    /// for cache updating.
-    typedef std::pair<AssertingVH<BasicBlock>, Value*> OverDefinedPairTy;
-    DenseSet<OverDefinedPairTy> OverDefinedCache;
 
-    /// SeenBlocks - Keep track of all blocks that we have ever seen, so we
+    /// This tracks, on a per-block basis, the set of values that are
+    /// over-defined at the end of that block.  This is required
+    /// for cache updating.
+    typedef DenseMap<AssertingVH<BasicBlock>, SmallPtrSet<Value *, 4>>
+        OverDefinedCacheTy;
+    OverDefinedCacheTy OverDefinedCache;
+
+    /// Keep track of all blocks that we have ever seen, so we
     /// don't spend time removing unused blocks from our caches.
     DenseSet<AssertingVH<BasicBlock> > SeenBlocks;
 
-    /// BlockValueStack - This stack holds the state of the value solver
-    /// during a query.  It basically emulates the callstack of the naive
+    /// This stack holds the state of the value solver during a query.
+    /// It basically emulates the callstack of the naive
     /// recursive value lookup process.
     std::stack<std::pair<BasicBlock*, Value*> > BlockValueStack;
 
-    /// A pointer to the cache of @llvm.assume calls.
-    AssumptionTracker *AT;
-    /// An optional DL pointer.
-    const DataLayout *DL;
-    /// An optional DT pointer.
-    DominatorTree *DT;
-    
-    friend struct LVIValueHandle;
-    
-    /// OverDefinedCacheUpdater - A helper object that ensures that the
-    /// OverDefinedCache is updated whenever solveBlockValue returns.
-    struct OverDefinedCacheUpdater {
-      LazyValueInfoCache *Parent;
-      Value *Val;
-      BasicBlock *BB;
-      LVILatticeVal &BBLV;
-      
-      OverDefinedCacheUpdater(Value *V, BasicBlock *B, LVILatticeVal &LV,
-                       LazyValueInfoCache *P)
-        : Parent(P), Val(V), BB(B), BBLV(LV) { }
-      
-      bool markResult(bool changed) { 
-        if (changed && BBLV.isOverdefined())
-          Parent->OverDefinedCache.insert(std::make_pair(BB, Val));
-        return changed;
-      }
-    };
-    
+    /// Keeps track of which block-value pairs are in BlockValueStack.
+    DenseSet<std::pair<BasicBlock*, Value*> > BlockValueSet;
 
+    /// Push BV onto BlockValueStack unless it's already in there.
+    /// Returns true on success.
+    bool pushBlockValue(const std::pair<BasicBlock *, Value *> &BV) {
+      if (!BlockValueSet.insert(BV).second)
+        return false;  // It's already in the stack.
+
+      BlockValueStack.push(BV);
+      return true;
+    }
+
+    AssumptionCache *AC;  ///< A pointer to the cache of @llvm.assume calls.
+    const DataLayout &DL; ///< A mandatory DataLayout
+    DominatorTree *DT;    ///< An optional DT pointer.
+
+    friend struct LVIValueHandle;
+
+    void insertResult(Value *Val, BasicBlock *BB, const LVILatticeVal &Result) {
+      SeenBlocks.insert(BB);
+      lookup(Val)[BB] = Result;
+      if (Result.isOverdefined())
+        OverDefinedCache[BB].insert(Val);
+    }
 
     LVILatticeVal getBlockValue(Value *Val, BasicBlock *BB);
     bool getEdgeValue(Value *V, BasicBlock *F, BasicBlock *T,
@@ -392,36 +384,35 @@ namespace {
                                             Instruction *BBI);
 
     void solve();
-    
+
     ValueCacheEntryTy &lookup(Value *V) {
       return ValueCache[LVIValueHandle(V, this)];
     }
 
   public:
-    /// getValueInBlock - This is the query interface to determine the lattice
+    /// This is the query interface to determine the lattice
     /// value for the specified Value* at the end of the specified block.
     LVILatticeVal getValueInBlock(Value *V, BasicBlock *BB,
                                   Instruction *CxtI = nullptr);
 
-    /// getValueAt - This is the query interface to determine the lattice
+    /// This is the query interface to determine the lattice
     /// value for the specified Value* at the specified instruction (generally
     /// from an assume intrinsic).
     LVILatticeVal getValueAt(Value *V, Instruction *CxtI);
 
-    /// getValueOnEdge - This is the query interface to determine the lattice
+    /// This is the query interface to determine the lattice
     /// value for the specified Value* that is true on the specified edge.
     LVILatticeVal getValueOnEdge(Value *V, BasicBlock *FromBB,BasicBlock *ToBB,
                                  Instruction *CxtI = nullptr);
-    
-    /// threadEdge - This is the update interface to inform the cache that an
-    /// edge from PredBB to OldSucc has been threaded to be from PredBB to
-    /// NewSucc.
+
+    /// This is the update interface to inform the cache that an edge from
+    /// PredBB to OldSucc has been threaded to be from PredBB to NewSucc.
     void threadEdge(BasicBlock *PredBB,BasicBlock *OldSucc,BasicBlock *NewSucc);
-    
-    /// eraseBlock - This is part of the update interface to inform the cache
+
+    /// This is part of the update interface to inform the cache
     /// that a block has been deleted.
     void eraseBlock(BasicBlock *BB);
-    
+
     /// clear - Empty the cache.
     void clear() {
       SeenBlocks.clear();
@@ -429,28 +420,24 @@ namespace {
       OverDefinedCache.clear();
     }
 
-    LazyValueInfoCache(AssumptionTracker *AT,
-                       const DataLayout *DL = nullptr,
-                       DominatorTree *DT = nullptr) : AT(AT), DL(DL), DT(DT) {}
+    LazyValueInfoCache(AssumptionCache *AC, const DataLayout &DL,
+                       DominatorTree *DT = nullptr)
+        : AC(AC), DL(DL), DT(DT) {}
   };
 } // end anonymous namespace
 
 void LVIValueHandle::deleted() {
-  typedef std::pair<AssertingVH<BasicBlock>, Value*> OverDefinedPairTy;
-  
-  SmallVector<OverDefinedPairTy, 4> ToErase;
-  for (DenseSet<OverDefinedPairTy>::iterator 
-       I = Parent->OverDefinedCache.begin(),
-       E = Parent->OverDefinedCache.end();
-       I != E; ++I) {
-    if (I->second == getValPtr())
-      ToErase.push_back(*I);
+  SmallVector<AssertingVH<BasicBlock>, 4> ToErase;
+  for (auto &I : Parent->OverDefinedCache) {
+    SmallPtrSetImpl<Value *> &ValueSet = I.second;
+    if (ValueSet.count(getValPtr()))
+      ValueSet.erase(getValPtr());
+    if (ValueSet.empty())
+      ToErase.push_back(I.first);
   }
+  for (auto &BB : ToErase)
+    Parent->OverDefinedCache.erase(BB);
 
-  for (SmallVectorImpl<OverDefinedPairTy>::iterator I = ToErase.begin(),
-       E = ToErase.end(); I != E; ++I)
-    Parent->OverDefinedCache.erase(*I);
-  
   // This erasure deallocates *this, so it MUST happen after we're done
   // using any and all members of *this.
   Parent->ValueCache.erase(*this);
@@ -463,28 +450,29 @@ void LazyValueInfoCache::eraseBlock(BasicBlock *BB) {
     return;
   SeenBlocks.erase(I);
 
-  SmallVector<OverDefinedPairTy, 4> ToErase;
-  for (DenseSet<OverDefinedPairTy>::iterator  I = OverDefinedCache.begin(),
-       E = OverDefinedCache.end(); I != E; ++I) {
-    if (I->first == BB)
-      ToErase.push_back(*I);
-  }
+  auto ODI = OverDefinedCache.find(BB);
+  if (ODI != OverDefinedCache.end())
+    OverDefinedCache.erase(ODI);
 
-  for (SmallVectorImpl<OverDefinedPairTy>::iterator I = ToErase.begin(),
-       E = ToErase.end(); I != E; ++I)
-    OverDefinedCache.erase(*I);
-
-  for (std::map<LVIValueHandle, ValueCacheEntryTy>::iterator
-       I = ValueCache.begin(), E = ValueCache.end(); I != E; ++I)
+  for (auto I = ValueCache.begin(), E = ValueCache.end(); I != E; ++I)
     I->second.erase(BB);
 }
 
 void LazyValueInfoCache::solve() {
   while (!BlockValueStack.empty()) {
     std::pair<BasicBlock*, Value*> &e = BlockValueStack.top();
+    assert(BlockValueSet.count(e) && "Stack value should be in BlockValueSet!");
+
     if (solveBlockValue(e.second, e.first)) {
-      assert(BlockValueStack.top() == e);
+      // The work item was completely processed.
+      assert(BlockValueStack.top() == e && "Nothing should have been pushed!");
+      assert(lookup(e.second).count(e.first) && "Result should be in cache!");
+
       BlockValueStack.pop();
+      BlockValueSet.erase(e);
+    } else {
+      // More work needs to be done before revisiting.
+      assert(BlockValueStack.top() != e && "Stack should have been pushed!");
     }
   }
 }
@@ -495,8 +483,7 @@ bool LazyValueInfoCache::hasBlockValue(Value *Val, BasicBlock *BB) {
     return true;
 
   LVIValueHandle ValHandle(Val, this);
-  std::map<LVIValueHandle, ValueCacheEntryTy>::iterator I =
-    ValueCache.find(ValHandle);
+  auto I = ValueCache.find(ValHandle);
   if (I == ValueCache.end()) return false;
   return I->second.count(BB);
 }
@@ -514,43 +501,40 @@ bool LazyValueInfoCache::solveBlockValue(Value *Val, BasicBlock *BB) {
   if (isa<Constant>(Val))
     return true;
 
-  ValueCacheEntryTy &Cache = lookup(Val);
-  SeenBlocks.insert(BB);
-  LVILatticeVal &BBLV = Cache[BB];
-  
-  // OverDefinedCacheUpdater is a helper object that will update
-  // the OverDefinedCache for us when this method exits.  Make sure to
-  // call markResult on it as we exist, passing a bool to indicate if the
-  // cache needs updating, i.e. if we have solve a new value or not.
-  OverDefinedCacheUpdater ODCacheUpdater(Val, BB, BBLV, this);
+  if (lookup(Val).count(BB)) {
+    // If we have a cached value, use that.
+    DEBUG(dbgs() << "  reuse BB '" << BB->getName()
+                 << "' val=" << lookup(Val)[BB] << '\n');
 
-  if (!BBLV.isUndefined()) {
-    DEBUG(dbgs() << "  reuse BB '" << BB->getName() << "' val=" << BBLV <<'\n');
-    
-    // Since we're reusing a cached value here, we don't need to update the 
-    // OverDefinedCahce.  The cache will have been properly updated 
-    // whenever the cached value was inserted.
-    ODCacheUpdater.markResult(false);
+    // Since we're reusing a cached value, we don't need to update the
+    // OverDefinedCache. The cache will have been properly updated whenever the
+    // cached value was inserted.
     return true;
   }
 
-  // Otherwise, this is the first time we're seeing this block.  Reset the
-  // lattice value to overdefined, so that cycles will terminate and be
-  // conservatively correct.
-  BBLV.markOverdefined();
-  
+  // Hold off inserting this value into the Cache in case we have to return
+  // false and come back later.
+  LVILatticeVal Res;
+
   Instruction *BBI = dyn_cast<Instruction>(Val);
   if (!BBI || BBI->getParent() != BB) {
-    return ODCacheUpdater.markResult(solveBlockValueNonLocal(BBLV, Val, BB));
+    if (!solveBlockValueNonLocal(Res, Val, BB))
+      return false;
+   insertResult(Val, BB, Res);
+   return true;
   }
 
   if (PHINode *PN = dyn_cast<PHINode>(BBI)) {
-    return ODCacheUpdater.markResult(solveBlockValuePHINode(BBLV, PN, BB));
+    if (!solveBlockValuePHINode(Res, PN, BB))
+      return false;
+    insertResult(Val, BB, Res);
+    return true;
   }
 
   if (AllocaInst *AI = dyn_cast<AllocaInst>(BBI)) {
-    BBLV = LVILatticeVal::getNot(ConstantPointerNull::get(AI->getType()));
-    return ODCacheUpdater.markResult(true);
+    Res = LVILatticeVal::getNot(ConstantPointerNull::get(AI->getType()));
+    insertResult(Val, BB, Res);
+    return true;
   }
 
   // We can only analyze the definitions of certain classes of instructions
@@ -560,8 +544,9 @@ bool LazyValueInfoCache::solveBlockValue(Value *Val, BasicBlock *BB) {
      !BBI->getType()->isIntegerTy()) {
     DEBUG(dbgs() << " compute BB '" << BB->getName()
                  << "' - overdefined because inst def found.\n");
-    BBLV.markOverdefined();
-    return ODCacheUpdater.markResult(true);
+    Res.markOverdefined();
+    insertResult(Val, BB, Res);
+    return true;
   }
 
   // FIXME: We're currently limited to binops with a constant RHS.  This should
@@ -571,21 +556,27 @@ bool LazyValueInfoCache::solveBlockValue(Value *Val, BasicBlock *BB) {
     DEBUG(dbgs() << " compute BB '" << BB->getName()
                  << "' - overdefined because inst def found.\n");
 
-    BBLV.markOverdefined();
-    return ODCacheUpdater.markResult(true);
+    Res.markOverdefined();
+    insertResult(Val, BB, Res);
+    return true;
   }
 
-  return ODCacheUpdater.markResult(solveBlockValueConstantRange(BBLV, BBI, BB));
+  if (!solveBlockValueConstantRange(Res, BBI, BB))
+    return false;
+  insertResult(Val, BB, Res);
+  return true;
 }
 
 static bool InstructionDereferencesPointer(Instruction *I, Value *Ptr) {
   if (LoadInst *L = dyn_cast<LoadInst>(I)) {
     return L->getPointerAddressSpace() == 0 &&
-        GetUnderlyingObject(L->getPointerOperand()) == Ptr;
+           GetUnderlyingObject(L->getPointerOperand(),
+                               L->getModule()->getDataLayout()) == Ptr;
   }
   if (StoreInst *S = dyn_cast<StoreInst>(I)) {
     return S->getPointerAddressSpace() == 0 &&
-        GetUnderlyingObject(S->getPointerOperand()) == Ptr;
+           GetUnderlyingObject(S->getPointerOperand(),
+                               S->getModule()->getDataLayout()) == Ptr;
   }
   if (MemIntrinsic *MI = dyn_cast<MemIntrinsic>(I)) {
     if (MI->isVolatile()) return false;
@@ -595,11 +586,13 @@ static bool InstructionDereferencesPointer(Instruction *I, Value *Ptr) {
     if (!Len || Len->isZero()) return false;
 
     if (MI->getDestAddressSpace() == 0)
-      if (GetUnderlyingObject(MI->getRawDest()) == Ptr)
+      if (GetUnderlyingObject(MI->getRawDest(),
+                              MI->getModule()->getDataLayout()) == Ptr)
         return true;
     if (MemTransferInst *MTI = dyn_cast<MemTransferInst>(MI))
       if (MTI->getSourceAddressSpace() == 0)
-        if (GetUnderlyingObject(MTI->getRawSource()) == Ptr)
+        if (GetUnderlyingObject(MTI->getRawSource(),
+                                MTI->getModule()->getDataLayout()) == Ptr)
           return true;
   }
   return false;
@@ -616,13 +609,13 @@ bool LazyValueInfoCache::solveBlockValueNonLocal(LVILatticeVal &BBLV,
     if (isKnownNonNull(Val)) {
       NotNull = true;
     } else {
-      Value *UnderlyingVal = GetUnderlyingObject(Val);
+      const DataLayout &DL = BB->getModule()->getDataLayout();
+      Value *UnderlyingVal = GetUnderlyingObject(Val, DL);
       // If 'GetUnderlyingObject' didn't converge, skip it. It won't converge
       // inside InstructionDereferencesPointer either.
-      if (UnderlyingVal == GetUnderlyingObject(UnderlyingVal, nullptr, 1)) {
-        for (BasicBlock::iterator BI = BB->begin(), BE = BB->end();
-             BI != BE; ++BI) {
-          if (InstructionDereferencesPointer(BI, UnderlyingVal)) {
+      if (UnderlyingVal == GetUnderlyingObject(UnderlyingVal, DL, 1)) {
+        for (Instruction &I : *BB) {
+          if (InstructionDereferencesPointer(&I, UnderlyingVal)) {
             NotNull = true;
             break;
           }
@@ -654,7 +647,7 @@ bool LazyValueInfoCache::solveBlockValueNonLocal(LVILatticeVal &BBLV,
     if (EdgesMissing)
       continue;
 
-    Result.mergeIn(EdgeResult);
+    Result.mergeIn(EdgeResult, DL);
 
     // If we hit overdefined, exit early.  The BlockVals entry is already set
     // to overdefined.
@@ -667,7 +660,7 @@ bool LazyValueInfoCache::solveBlockValueNonLocal(LVILatticeVal &BBLV,
         PointerType *PTy = cast<PointerType>(Val->getType());
         Result = LVILatticeVal::getNot(ConstantPointerNull::get(PTy));
       }
-      
+
       BBLV = Result;
       return true;
     }
@@ -680,7 +673,7 @@ bool LazyValueInfoCache::solveBlockValueNonLocal(LVILatticeVal &BBLV,
   BBLV = Result;
   return true;
 }
-  
+
 bool LazyValueInfoCache::solveBlockValuePHINode(LVILatticeVal &BBLV,
                                                 PHINode *PN, BasicBlock *BB) {
   LVILatticeVal Result;  // Start Undefined.
@@ -699,14 +692,14 @@ bool LazyValueInfoCache::solveBlockValuePHINode(LVILatticeVal &BBLV,
     if (EdgesMissing)
       continue;
 
-    Result.mergeIn(EdgeResult);
+    Result.mergeIn(EdgeResult, DL);
 
     // If we hit overdefined, exit early.  The BlockVals entry is already set
     // to overdefined.
     if (Result.isOverdefined()) {
       DEBUG(dbgs() << " compute BB '" << BB->getName()
             << "' - overdefined because of pred.\n");
-      
+
       BBLV = Result;
       return true;
     }
@@ -724,17 +717,21 @@ static bool getValueFromFromCondition(Value *Val, ICmpInst *ICI,
                                       LVILatticeVal &Result,
                                       bool isTrueDest = true);
 
-// If we can determine a constant range for the value Val at the context
+// If we can determine a constant range for the value Val in the context
 // provided by the instruction BBI, then merge it into BBLV. If we did find a
 // constant range, return true.
-void LazyValueInfoCache::mergeAssumeBlockValueConstantRange(
-  Value *Val, LVILatticeVal &BBLV, Instruction *BBI) {
+void LazyValueInfoCache::mergeAssumeBlockValueConstantRange(Value *Val,
+                                                            LVILatticeVal &BBLV,
+                                                            Instruction *BBI) {
   BBI = BBI ? BBI : dyn_cast<Instruction>(Val);
   if (!BBI)
     return;
 
-  for (auto &I : AT->assumptions(BBI->getParent()->getParent())) {
-    if (!isValidAssumeForContext(I, BBI, DL, DT))
+  for (auto &AssumeVH : AC->assumptions()) {
+    if (!AssumeVH)
+      continue;
+    auto *I = cast<CallInst>(AssumeVH);
+    if (!isValidAssumeForContext(I, BBI, DT))
       continue;
 
     Value *C = I->getArgOperand(0);
@@ -744,7 +741,7 @@ void LazyValueInfoCache::mergeAssumeBlockValueConstantRange(
         if (BBLV.isOverdefined())
           BBLV = Result;
         else
-          BBLV.mergeIn(Result);
+          BBLV.mergeIn(Result, DL);
       }
     }
   }
@@ -755,8 +752,10 @@ bool LazyValueInfoCache::solveBlockValueConstantRange(LVILatticeVal &BBLV,
                                                       BasicBlock *BB) {
   // Figure out the range of the LHS.  If that fails, bail.
   if (!hasBlockValue(BBI->getOperand(0), BB)) {
-    BlockValueStack.push(std::make_pair(BB, BBI->getOperand(0)));
-    return false;
+    if (pushBlockValue(std::make_pair(BB, BBI->getOperand(0))))
+      return false;
+    BBLV.markOverdefined();
+    return true;
   }
 
   LVILatticeVal LHSVal = getBlockValue(BBI->getOperand(0), BB);
@@ -765,7 +764,7 @@ bool LazyValueInfoCache::solveBlockValueConstantRange(LVILatticeVal &BBLV,
     BBLV.markOverdefined();
     return true;
   }
-  
+
   ConstantRange LHSRange = LHSVal.getConstantRange();
   ConstantRange RHSRange(1);
   IntegerType *ResultTy = cast<IntegerType>(BBI->getType());
@@ -819,7 +818,7 @@ bool LazyValueInfoCache::solveBlockValueConstantRange(LVILatticeVal &BBLV,
   case Instruction::Or:
     Result.markConstantRange(LHSRange.binaryOr(RHSRange));
     break;
-  
+
   // Unhandled instructions are overdefined.
   default:
     DEBUG(dbgs() << " compute BB '" << BB->getName()
@@ -827,7 +826,7 @@ bool LazyValueInfoCache::solveBlockValueConstantRange(LVILatticeVal &BBLV,
     Result.markOverdefined();
     break;
   }
-  
+
   BBLV = Result;
   return true;
 }
@@ -854,10 +853,10 @@ bool getValueFromFromCondition(Value *Val, ICmpInst *ICI,
 
     ConstantInt *CI = dyn_cast<ConstantInt>(ICI->getOperand(1));
     if (CI && (ICI->getOperand(0) == Val || NegOffset)) {
-      // Calculate the range of values that would satisfy the comparison.
+      // Calculate the range of values that are allowed by the comparison
       ConstantRange CmpRange(CI->getValue());
       ConstantRange TrueValues =
-        ConstantRange::makeICmpRegion(ICI->getPredicate(), CmpRange);
+          ConstantRange::makeAllowedICmpRegion(ICI->getPredicate(), CmpRange);
 
       if (NegOffset) // Apply the offset from above.
         TrueValues = TrueValues.subtract(NegOffset->getValue());
@@ -877,17 +876,17 @@ bool getValueFromFromCondition(Value *Val, ICmpInst *ICI,
 /// Val is not constrained on the edge.
 static bool getEdgeValueLocal(Value *Val, BasicBlock *BBFrom,
                               BasicBlock *BBTo, LVILatticeVal &Result) {
-  // TODO: Handle more complex conditionals.  If (v == 0 || v2 < 1) is false, we
+  // TODO: Handle more complex conditionals. If (v == 0 || v2 < 1) is false, we
   // know that v != 0.
   if (BranchInst *BI = dyn_cast<BranchInst>(BBFrom->getTerminator())) {
     // If this is a conditional branch and only one successor goes to BBTo, then
-    // we maybe able to infer something from the condition. 
+    // we may be able to infer something from the condition.
     if (BI->isConditional() &&
         BI->getSuccessor(0) != BI->getSuccessor(1)) {
       bool isTrueDest = BI->getSuccessor(0) == BBTo;
       assert(BI->getSuccessor(!isTrueDest) == BBTo &&
              "BBTo isn't a successor of BBFrom");
-      
+
       // If V is the condition of the branch itself, then we know exactly what
       // it is.
       if (BI->getCondition() == Val) {
@@ -895,12 +894,12 @@ static bool getEdgeValueLocal(Value *Val, BasicBlock *BBFrom,
                               Type::getInt1Ty(Val->getContext()), isTrueDest));
         return true;
       }
-      
+
       // If the condition of the branch is an equality comparison, we may be
       // able to infer the value.
-      ICmpInst *ICI = dyn_cast<ICmpInst>(BI->getCondition());
-      if (getValueFromFromCondition(Val, ICI, Result, isTrueDest))
-        return true;
+      if (ICmpInst *ICI = dyn_cast<ICmpInst>(BI->getCondition()))
+        if (getValueFromFromCondition(Val, ICI, Result, isTrueDest))
+          return true;
     }
   }
 
@@ -914,8 +913,7 @@ static bool getEdgeValueLocal(Value *Val, BasicBlock *BBFrom,
     unsigned BitWidth = Val->getType()->getIntegerBitWidth();
     ConstantRange EdgesVals(BitWidth, DefaultCase/*isFullSet*/);
 
-    for (SwitchInst::CaseIt i = SI->case_begin(), e = SI->case_end();
-         i != e; ++i) {
+    for (SwitchInst::CaseIt i : SI->cases()) {
       ConstantRange EdgeVal(i.getCaseValue()->getValue());
       if (DefaultCase) {
         // It is possible that the default destination is the destination of
@@ -931,8 +929,8 @@ static bool getEdgeValueLocal(Value *Val, BasicBlock *BBFrom,
   return false;
 }
 
-/// \brief Compute the value of Val on the edge BBFrom -> BBTo, or the value at
-/// the basic block if the edge does not constraint Val.
+/// \brief Compute the value of Val on the edge BBFrom -> BBTo or the value at
+/// the basic block if the edge does not constrain Val.
 bool LazyValueInfoCache::getEdgeValue(Value *Val, BasicBlock *BBFrom,
                                       BasicBlock *BBTo, LVILatticeVal &Result,
                                       Instruction *CxtI) {
@@ -944,15 +942,17 @@ bool LazyValueInfoCache::getEdgeValue(Value *Val, BasicBlock *BBFrom,
 
   if (getEdgeValueLocal(Val, BBFrom, BBTo, Result)) {
     if (!Result.isConstantRange() ||
-      Result.getConstantRange().getSingleElement())
+        Result.getConstantRange().getSingleElement())
       return true;
 
     // FIXME: this check should be moved to the beginning of the function when
     // LVI better supports recursive values. Even for the single value case, we
     // can intersect to detect dead code (an empty range).
     if (!hasBlockValue(Val, BBFrom)) {
-      BlockValueStack.push(std::make_pair(BBFrom, Val));
-      return false;
+      if (pushBlockValue(std::make_pair(BBFrom, Val)))
+        return false;
+      Result.markOverdefined();
+      return true;
     }
 
     // Try to intersect ranges of the BB and the constraint on the edge.
@@ -971,11 +971,13 @@ bool LazyValueInfoCache::getEdgeValue(Value *Val, BasicBlock *BBFrom,
   }
 
   if (!hasBlockValue(Val, BBFrom)) {
-    BlockValueStack.push(std::make_pair(BBFrom, Val));
-    return false;
+    if (pushBlockValue(std::make_pair(BBFrom, Val)))
+      return false;
+    Result.markOverdefined();
+    return true;
   }
 
-  // if we couldn't compute the value on the edge, use the value from the BB
+  // If we couldn't compute the value on the edge, use the value from the BB.
   Result = getBlockValue(Val, BBFrom);
   mergeAssumeBlockValueConstantRange(Val, Result, BBFrom->getTerminator());
   // We can use the context instruction (generically the ultimate instruction
@@ -994,8 +996,10 @@ LVILatticeVal LazyValueInfoCache::getValueInBlock(Value *V, BasicBlock *BB,
                                                   Instruction *CxtI) {
   DEBUG(dbgs() << "LVI Getting block end value " << *V << " at '"
         << BB->getName() << "'\n");
-  
-  BlockValueStack.push(std::make_pair(BB, V));
+
+  assert(BlockValueStack.empty() && BlockValueSet.empty());
+  pushBlockValue(std::make_pair(BB, V));
+
   solve();
   LVILatticeVal Result = getBlockValue(V, BB);
   mergeAssumeBlockValueConstantRange(V, Result, CxtI);
@@ -1020,7 +1024,7 @@ getValueOnEdge(Value *V, BasicBlock *FromBB, BasicBlock *ToBB,
                Instruction *CxtI) {
   DEBUG(dbgs() << "LVI Getting edge value " << *V << " from '"
         << FromBB->getName() << "' to '" << ToBB->getName() << "'\n");
-  
+
   LVILatticeVal Result;
   if (!getEdgeValue(V, FromBB, ToBB, Result, CxtI)) {
     solve();
@@ -1035,26 +1039,24 @@ getValueOnEdge(Value *V, BasicBlock *FromBB, BasicBlock *ToBB,
 
 void LazyValueInfoCache::threadEdge(BasicBlock *PredBB, BasicBlock *OldSucc,
                                     BasicBlock *NewSucc) {
-  // When an edge in the graph has been threaded, values that we could not 
-  // determine a value for before (i.e. were marked overdefined) may be possible
-  // to solve now.  We do NOT try to proactively update these values.  Instead,
-  // we clear their entries from the cache, and allow lazy updating to recompute
-  // them when needed.
-  
-  // The updating process is fairly simple: we need to dropped cached info
+  // When an edge in the graph has been threaded, values that we could not
+  // determine a value for before (i.e. were marked overdefined) may be
+  // possible to solve now. We do NOT try to proactively update these values.
+  // Instead, we clear their entries from the cache, and allow lazy updating to
+  // recompute them when needed.
+
+  // The updating process is fairly simple: we need to drop cached info
   // for all values that were marked overdefined in OldSucc, and for those same
   // values in any successor of OldSucc (except NewSucc) in which they were
   // also marked overdefined.
   std::vector<BasicBlock*> worklist;
   worklist.push_back(OldSucc);
-  
-  DenseSet<Value*> ClearSet;
-  for (DenseSet<OverDefinedPairTy>::iterator I = OverDefinedCache.begin(),
-       E = OverDefinedCache.end(); I != E; ++I) {
-    if (I->first == OldSucc)
-      ClearSet.insert(I->second);
-  }
-  
+
+  auto I = OverDefinedCache.find(OldSucc);
+  if (I == OverDefinedCache.end())
+    return; // Nothing to process here.
+  SmallVector<Value *, 4> ValsToClear(I->second.begin(), I->second.end());
+
   // Use a worklist to perform a depth-first search of OldSucc's successors.
   // NOTE: We do not need a visited list since any blocks we have already
   // visited will have had their overdefined markers cleared already, and we
@@ -1062,33 +1064,37 @@ void LazyValueInfoCache::threadEdge(BasicBlock *PredBB, BasicBlock *OldSucc,
   while (!worklist.empty()) {
     BasicBlock *ToUpdate = worklist.back();
     worklist.pop_back();
-    
+
     // Skip blocks only accessible through NewSucc.
     if (ToUpdate == NewSucc) continue;
-    
+
     bool changed = false;
-    for (DenseSet<Value*>::iterator I = ClearSet.begin(), E = ClearSet.end();
-         I != E; ++I) {
+    for (Value *V : ValsToClear) {
       // If a value was marked overdefined in OldSucc, and is here too...
-      DenseSet<OverDefinedPairTy>::iterator OI =
-        OverDefinedCache.find(std::make_pair(ToUpdate, *I));
-      if (OI == OverDefinedCache.end()) continue;
+      auto OI = OverDefinedCache.find(ToUpdate);
+      if (OI == OverDefinedCache.end())
+        continue;
+      SmallPtrSetImpl<Value *> &ValueSet = OI->second;
+      if (!ValueSet.count(V))
+        continue;
 
       // Remove it from the caches.
-      ValueCacheEntryTy &Entry = ValueCache[LVIValueHandle(*I, this)];
+      ValueCacheEntryTy &Entry = ValueCache[LVIValueHandle(V, this)];
       ValueCacheEntryTy::iterator CI = Entry.find(ToUpdate);
 
       assert(CI != Entry.end() && "Couldn't find entry to update?");
       Entry.erase(CI);
-      OverDefinedCache.erase(OI);
+      ValueSet.erase(V);
+      if (ValueSet.empty())
+        OverDefinedCache.erase(OI);
 
-      // If we removed anything, then we potentially need to update 
+      // If we removed anything, then we potentially need to update
       // blocks successors too.
       changed = true;
     }
 
     if (!changed) continue;
-    
+
     worklist.insert(worklist.end(), succ_begin(ToUpdate), succ_end(ToUpdate));
   }
 }
@@ -1097,29 +1103,29 @@ void LazyValueInfoCache::threadEdge(BasicBlock *PredBB, BasicBlock *OldSucc,
 //                            LazyValueInfo Impl
 //===----------------------------------------------------------------------===//
 
-/// getCache - This lazily constructs the LazyValueInfoCache.
-static LazyValueInfoCache &getCache(void *&PImpl,
-                                    AssumptionTracker *AT,
-                                    const DataLayout *DL = nullptr,
+/// This lazily constructs the LazyValueInfoCache.
+static LazyValueInfoCache &getCache(void *&PImpl, AssumptionCache *AC,
+                                    const DataLayout *DL,
                                     DominatorTree *DT = nullptr) {
-  if (!PImpl)
-    PImpl = new LazyValueInfoCache(AT, DL, DT);
+  if (!PImpl) {
+    assert(DL && "getCache() called with a null DataLayout");
+    PImpl = new LazyValueInfoCache(AC, *DL, DT);
+  }
   return *static_cast<LazyValueInfoCache*>(PImpl);
 }
 
 bool LazyValueInfo::runOnFunction(Function &F) {
-  AT = &getAnalysis<AssumptionTracker>();
+  AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
+  const DataLayout &DL = F.getParent()->getDataLayout();
 
   DominatorTreeWrapperPass *DTWP =
       getAnalysisIfAvailable<DominatorTreeWrapperPass>();
   DT = DTWP ? &DTWP->getDomTree() : nullptr;
 
-  DataLayoutPass *DLP = getAnalysisIfAvailable<DataLayoutPass>();
-  DL = DLP ? &DLP->getDataLayout() : nullptr;
-  TLI = &getAnalysis<TargetLibraryInfo>();
+  TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
 
   if (PImpl)
-    getCache(PImpl, AT, DL, DT).clear();
+    getCache(PImpl, AC, &DL, DT).clear();
 
   // Fully lazy.
   return false;
@@ -1127,23 +1133,24 @@ bool LazyValueInfo::runOnFunction(Function &F) {
 
 void LazyValueInfo::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
-  AU.addRequired<AssumptionTracker>();
-  AU.addRequired<TargetLibraryInfo>();
+  AU.addRequired<AssumptionCacheTracker>();
+  AU.addRequired<TargetLibraryInfoWrapperPass>();
 }
 
 void LazyValueInfo::releaseMemory() {
   // If the cache was allocated, free it.
   if (PImpl) {
-    delete &getCache(PImpl, AT);
+    delete &getCache(PImpl, AC, nullptr);
     PImpl = nullptr;
   }
 }
 
 Constant *LazyValueInfo::getConstant(Value *V, BasicBlock *BB,
                                      Instruction *CxtI) {
+  const DataLayout &DL = BB->getModule()->getDataLayout();
   LVILatticeVal Result =
-    getCache(PImpl, AT, DL, DT).getValueInBlock(V, BB, CxtI);
-  
+      getCache(PImpl, AC, &DL, DT).getValueInBlock(V, BB, CxtI);
+
   if (Result.isConstant())
     return Result.getConstant();
   if (Result.isConstantRange()) {
@@ -1154,14 +1161,15 @@ Constant *LazyValueInfo::getConstant(Value *V, BasicBlock *BB,
   return nullptr;
 }
 
-/// getConstantOnEdge - Determine whether the specified value is known to be a
-/// constant on the specified edge.  Return null if not.
+/// Determine whether the specified value is known to be a
+/// constant on the specified edge. Return null if not.
 Constant *LazyValueInfo::getConstantOnEdge(Value *V, BasicBlock *FromBB,
                                            BasicBlock *ToBB,
                                            Instruction *CxtI) {
+  const DataLayout &DL = FromBB->getModule()->getDataLayout();
   LVILatticeVal Result =
-    getCache(PImpl, AT, DL, DT).getValueOnEdge(V, FromBB, ToBB, CxtI);
-  
+      getCache(PImpl, AC, &DL, DT).getValueOnEdge(V, FromBB, ToBB, CxtI);
+
   if (Result.isConstant())
     return Result.getConstant();
   if (Result.isConstantRange()) {
@@ -1172,9 +1180,10 @@ Constant *LazyValueInfo::getConstantOnEdge(Value *V, BasicBlock *FromBB,
   return nullptr;
 }
 
-static LazyValueInfo::Tristate
-getPredicateResult(unsigned Pred, Constant *C, LVILatticeVal &Result,
-                   const DataLayout *DL, TargetLibraryInfo *TLI) {
+static LazyValueInfo::Tristate getPredicateResult(unsigned Pred, Constant *C,
+                                                  LVILatticeVal &Result,
+                                                  const DataLayout &DL,
+                                                  TargetLibraryInfo *TLI) {
 
   // If we know the value is a constant, evaluate the conditional.
   Constant *Res = nullptr;
@@ -1185,26 +1194,26 @@ getPredicateResult(unsigned Pred, Constant *C, LVILatticeVal &Result,
       return ResCI->isZero() ? LazyValueInfo::False : LazyValueInfo::True;
     return LazyValueInfo::Unknown;
   }
-  
+
   if (Result.isConstantRange()) {
     ConstantInt *CI = dyn_cast<ConstantInt>(C);
     if (!CI) return LazyValueInfo::Unknown;
-    
+
     ConstantRange CR = Result.getConstantRange();
     if (Pred == ICmpInst::ICMP_EQ) {
       if (!CR.contains(CI->getValue()))
         return LazyValueInfo::False;
-      
+
       if (CR.isSingleElement() && CR.contains(CI->getValue()))
         return LazyValueInfo::True;
     } else if (Pred == ICmpInst::ICMP_NE) {
       if (!CR.contains(CI->getValue()))
         return LazyValueInfo::True;
-      
+
       if (CR.isSingleElement() && CR.contains(CI->getValue()))
         return LazyValueInfo::False;
     }
-    
+
     // Handle more complex predicates.
     ConstantRange TrueValues =
         ICmpInst::makeConstantRange((ICmpInst::Predicate)Pred, CI->getValue());
@@ -1214,7 +1223,7 @@ getPredicateResult(unsigned Pred, Constant *C, LVILatticeVal &Result,
       return LazyValueInfo::False;
     return LazyValueInfo::Unknown;
   }
-  
+
   if (Result.isNotConstant()) {
     // If this is an equality comparison, we can try to fold it knowing that
     // "V != C1".
@@ -1235,19 +1244,19 @@ getPredicateResult(unsigned Pred, Constant *C, LVILatticeVal &Result,
     }
     return LazyValueInfo::Unknown;
   }
-  
+
   return LazyValueInfo::Unknown;
 }
 
-/// getPredicateOnEdge - Determine whether the specified value comparison
-/// with a constant is known to be true or false on the specified CFG edge.
-/// Pred is a CmpInst predicate.
+/// Determine whether the specified value comparison with a constant is known to
+/// be true or false on the specified CFG edge. Pred is a CmpInst predicate.
 LazyValueInfo::Tristate
 LazyValueInfo::getPredicateOnEdge(unsigned Pred, Value *V, Constant *C,
                                   BasicBlock *FromBB, BasicBlock *ToBB,
                                   Instruction *CxtI) {
+  const DataLayout &DL = FromBB->getModule()->getDataLayout();
   LVILatticeVal Result =
-    getCache(PImpl, AT, DL, DT).getValueOnEdge(V, FromBB, ToBB, CxtI);
+      getCache(PImpl, AC, &DL, DT).getValueOnEdge(V, FromBB, ToBB, CxtI);
 
   return getPredicateResult(Pred, C, Result, DL, TLI);
 }
@@ -1255,17 +1264,85 @@ LazyValueInfo::getPredicateOnEdge(unsigned Pred, Value *V, Constant *C,
 LazyValueInfo::Tristate
 LazyValueInfo::getPredicateAt(unsigned Pred, Value *V, Constant *C,
                               Instruction *CxtI) {
-  LVILatticeVal Result =
-    getCache(PImpl, AT, DL, DT).getValueAt(V, CxtI);
+  const DataLayout &DL = CxtI->getModule()->getDataLayout();
+  LVILatticeVal Result = getCache(PImpl, AC, &DL, DT).getValueAt(V, CxtI);
+  Tristate Ret = getPredicateResult(Pred, C, Result, DL, TLI);
+  if (Ret != Unknown)
+    return Ret;
 
-  return getPredicateResult(Pred, C, Result, DL, TLI);
+  // TODO: Move this logic inside getValueAt so that it can be cached rather
+  // than re-queried on each call. This would also allow us to merge the
+  // underlying lattice values to get more information.
+  if (CxtI) {
+    BasicBlock *BB = CxtI->getParent();
+
+    // Function entry or an unreachable block.  Bail to avoid confusing
+    // analysis below.
+    pred_iterator PI = pred_begin(BB), PE = pred_end(BB);
+    if (PI == PE)
+      return Unknown;
+
+    // If V is a PHI node in the same block as the context, we need to ask
+    // questions about the predicate as applied to the incoming value along
+    // each edge. This is useful for eliminating cases where the predicate is
+    // known along all incoming edges.
+    if (auto *PHI = dyn_cast<PHINode>(V))
+      if (PHI->getParent() == BB) {
+        Tristate Baseline = Unknown;
+        for (unsigned i = 0, e = PHI->getNumIncomingValues(); i < e; i++) {
+          Value *Incoming = PHI->getIncomingValue(i);
+          BasicBlock *PredBB = PHI->getIncomingBlock(i);
+          // Note that PredBB may be BB itself.        
+          Tristate Result = getPredicateOnEdge(Pred, Incoming, C, PredBB, BB,
+                                               CxtI);
+          
+          // Keep going as long as we've seen a consistent known result for
+          // all inputs.
+          Baseline = (i == 0) ? Result /* First iteration */
+            : (Baseline == Result ? Baseline : Unknown); /* All others */
+          if (Baseline == Unknown)
+            break;
+        }
+        if (Baseline != Unknown)
+          return Baseline;
+      }    
+
+    // For a comparison where the V is outside this block, it's possible
+    // that we've branched on it before. Look to see if the value is known
+    // on all incoming edges.
+    if (!isa<Instruction>(V) ||
+        cast<Instruction>(V)->getParent() != BB) {
+      // For predecessor edge, determine if the comparison is true or false
+      // on that edge. If they're all true or all false, we can conclude
+      // the value of the comparison in this block.
+      Tristate Baseline = getPredicateOnEdge(Pred, V, C, *PI, BB, CxtI);
+      if (Baseline != Unknown) {
+        // Check that all remaining incoming values match the first one.
+        while (++PI != PE) {
+          Tristate Ret = getPredicateOnEdge(Pred, V, C, *PI, BB, CxtI);
+          if (Ret != Baseline) break;
+        }
+        // If we terminated early, then one of the values didn't match.
+        if (PI == PE) {
+          return Baseline;
+        }
+      }
+    }
+  }
+  return Unknown;
 }
 
 void LazyValueInfo::threadEdge(BasicBlock *PredBB, BasicBlock *OldSucc,
                                BasicBlock *NewSucc) {
-  if (PImpl) getCache(PImpl, AT, DL, DT).threadEdge(PredBB, OldSucc, NewSucc);
+  if (PImpl) {
+    const DataLayout &DL = PredBB->getModule()->getDataLayout();
+    getCache(PImpl, AC, &DL, DT).threadEdge(PredBB, OldSucc, NewSucc);
+  }
 }
 
 void LazyValueInfo::eraseBlock(BasicBlock *BB) {
-  if (PImpl) getCache(PImpl, AT, DL, DT).eraseBlock(BB);
+  if (PImpl) {
+    const DataLayout &DL = BB->getModule()->getDataLayout();
+    getCache(PImpl, AC, &DL, DT).eraseBlock(BB);
+  }
 }

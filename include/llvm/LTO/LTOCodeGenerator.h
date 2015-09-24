@@ -53,6 +53,7 @@ namespace llvm {
   class TargetLibraryInfo;
   class TargetMachine;
   class raw_ostream;
+  class raw_pwrite_stream;
 
 //===----------------------------------------------------------------------===//
 /// C++ class which implements the opaque lto_code_gen_t type.
@@ -64,58 +65,81 @@ struct LTOCodeGenerator {
   LTOCodeGenerator(std::unique_ptr<LLVMContext> Context);
   ~LTOCodeGenerator();
 
-  // Merge given module, return true on success.
+  /// Merge given module.  Return true on success.
   bool addModule(struct LTOModule *);
 
-  void setTargetOptions(TargetOptions options);
+  /// Set the destination module.
+  void setModule(std::unique_ptr<LTOModule> M);
+
+  void setTargetOptions(TargetOptions Options);
   void setDebugInfo(lto_debug_model);
-  void setCodePICModel(lto_codegen_model);
+  void setCodePICModel(Reloc::Model Model) { RelocModel = Model; }
 
-  void setCpu(const char *mCpu) { MCpu = mCpu; }
-  void setAttr(const char *mAttr) { MAttr = mAttr; }
+  void setCpu(const char *MCpu) { this->MCpu = MCpu; }
+  void setAttr(const char *MAttr) { this->MAttr = MAttr; }
+  void setOptLevel(unsigned OptLevel);
 
-  void addMustPreserveSymbol(const char *sym) { MustPreserveSymbols[sym] = 1; }
+  void setShouldInternalize(bool Value) { ShouldInternalize = Value; }
+  void setShouldEmbedUselists(bool Value) { ShouldEmbedUselists = Value; }
 
-  // To pass options to the driver and optimization passes. These options are
-  // not necessarily for debugging purpose (The function name is misleading).
-  // This function should be called before LTOCodeGenerator::compilexxx(),
-  // and LTOCodeGenerator::writeMergedModules().
-  void setCodeGenDebugOptions(const char *opts);
+  void addMustPreserveSymbol(StringRef Sym) { MustPreserveSymbols[Sym] = 1; }
 
-  // Parse the options set in setCodeGenDebugOptions. Like
-  // setCodeGenDebugOptions, this must be called before
-  // LTOCodeGenerator::compilexxx() and LTOCodeGenerator::writeMergedModules()
+  /// Pass options to the driver and optimization passes.
+  ///
+  /// These options are not necessarily for debugging purpose (the function
+  /// name is misleading).  This function should be called before
+  /// LTOCodeGenerator::compilexxx(), and
+  /// LTOCodeGenerator::writeMergedModules().
+  void setCodeGenDebugOptions(const char *Opts);
+
+  /// Parse the options set in setCodeGenDebugOptions.
+  ///
+  /// Like \a setCodeGenDebugOptions(), this must be called before
+  /// LTOCodeGenerator::compilexxx() and
+  /// LTOCodeGenerator::writeMergedModules().
   void parseCodeGenDebugOptions();
 
-  // Write the merged module to the file specified by the given path.
-  // Return true on success.
-  bool writeMergedModules(const char *path, std::string &errMsg);
+  /// Write the merged module to the file specified by the given path.  Return
+  /// true on success.
+  bool writeMergedModules(const char *Path, std::string &ErrMsg);
 
-  // Compile the merged module into a *single* object file; the path to object
-  // file is returned to the caller via argument "name". Return true on
-  // success.
-  //
-  // NOTE that it is up to the linker to remove the intermediate object file.
-  //  Do not try to remove the object file in LTOCodeGenerator's destructor
-  //  as we don't who (LTOCodeGenerator or the obj file) will last longer.
-  bool compile_to_file(const char **name,
-                       bool disableOpt,
-                       bool disableInline,
-                       bool disableGVNLoadPRE,
-                       bool disableVectorization,
-                       std::string &errMsg);
+  /// Compile the merged module into a *single* object file; the path to object
+  /// file is returned to the caller via argument "name". Return true on
+  /// success.
+  ///
+  /// \note It is up to the linker to remove the intermediate object file.  Do
+  /// not try to remove the object file in LTOCodeGenerator's destructor as we
+  /// don't who (LTOCodeGenerator or the obj file) will last longer.
+  bool compile_to_file(const char **Name, bool DisableVerify,
+                       bool DisableInline, bool DisableGVNLoadPRE,
+                       bool DisableVectorization, std::string &ErrMsg);
 
-  // As with compile_to_file(), this function compiles the merged module into
-  // single object file. Instead of returning the object-file-path to the caller
-  // (linker), it brings the object to a buffer, and return the buffer to the
-  // caller. This function should delete intermediate object file once its content
-  // is brought to memory. Return NULL if the compilation was not successful.
-  const void *compile(size_t *length,
-                      bool disableOpt,
-                      bool disableInline,
-                      bool disableGVNLoadPRE,
-                      bool disableVectorization,
-                      std::string &errMsg);
+  /// As with compile_to_file(), this function compiles the merged module into
+  /// single object file. Instead of returning the object-file-path to the
+  /// caller (linker), it brings the object to a buffer, and return the buffer
+  /// to the caller. This function should delete intermediate object file once
+  /// its content is brought to memory. Return NULL if the compilation was not
+  /// successful.
+  std::unique_ptr<MemoryBuffer> compile(bool DisableVerify, bool DisableInline,
+                                        bool DisableGVNLoadPRE,
+                                        bool DisableVectorization,
+                                        std::string &errMsg);
+
+  /// Optimizes the merged module.  Returns true on success.
+  bool optimize(bool DisableVerify, bool DisableInline, bool DisableGVNLoadPRE,
+                bool DisableVectorization, std::string &ErrMsg);
+
+  /// Compiles the merged optimized module into a single object file. It brings
+  /// the object to a buffer, and returns the buffer to the caller. Return NULL
+  /// if the compilation was not successful.
+  std::unique_ptr<MemoryBuffer> compileOptimized(std::string &ErrMsg);
+
+  /// Compile the merged optimized module into out.size() object files each
+  /// representing a linkable partition of the module. If out contains more
+  /// than one element, code generation is done in parallel with out.size()
+  /// threads.  Object files will be written to members of out. Returns true on
+  /// success.
+  bool compileOptimized(ArrayRef<raw_pwrite_stream *> Out, std::string &ErrMsg);
 
   void setDiagnosticHandler(lto_diagnostic_handler_t, void *);
 
@@ -124,15 +148,13 @@ struct LTOCodeGenerator {
 private:
   void initializeLTOPasses();
 
-  bool generateObjectFile(raw_ostream &out, bool disableOpt, bool disableInline,
-                          bool disableGVNLoadPRE, bool disableVectorization,
-                          std::string &errMsg);
+  bool compileOptimizedToFile(const char **Name, std::string &ErrMsg);
   void applyScopeRestrictions();
   void applyRestriction(GlobalValue &GV, ArrayRef<StringRef> Libcalls,
                         std::vector<const char *> &MustPreserveList,
                         SmallPtrSetImpl<GlobalValue *> &AsmUsed,
                         Mangler &Mangler);
-  bool determineTarget(std::string &errMsg);
+  bool determineTarget(std::string &ErrMsg);
 
   static void DiagnosticHandler(const DiagnosticInfo &DI, void *Context);
 
@@ -140,24 +162,28 @@ private:
 
   typedef StringMap<uint8_t> StringSet;
 
-  void initialize();
   std::unique_ptr<LLVMContext> OwnedContext;
   LLVMContext &Context;
+  std::unique_ptr<Module> MergedModule;
   Linker IRLinker;
-  TargetMachine *TargetMach;
-  bool EmitDwarfDebugInfo;
-  bool ScopeRestrictionsDone;
-  lto_codegen_model CodeModel;
+  std::unique_ptr<TargetMachine> TargetMach;
+  bool EmitDwarfDebugInfo = false;
+  bool ScopeRestrictionsDone = false;
+  Reloc::Model RelocModel = Reloc::Default;
   StringSet MustPreserveSymbols;
   StringSet AsmUndefinedRefs;
-  std::unique_ptr<MemoryBuffer> NativeObjectFile;
-  std::vector<char *> CodegenOptions;
+  std::vector<std::string> CodegenOptions;
+  std::string FeatureStr;
   std::string MCpu;
   std::string MAttr;
   std::string NativeObjectPath;
   TargetOptions Options;
-  lto_diagnostic_handler_t DiagHandler;
-  void *DiagContext;
+  CodeGenOpt::Level CGOptLevel = CodeGenOpt::Default;
+  unsigned OptLevel = 2;
+  lto_diagnostic_handler_t DiagHandler = nullptr;
+  void *DiagContext = nullptr;
+  bool ShouldInternalize = true;
+  bool ShouldEmbedUselists = false;
 };
 }
 #endif

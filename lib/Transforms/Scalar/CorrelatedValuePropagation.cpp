@@ -13,12 +13,14 @@
 
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -42,6 +44,7 @@ namespace {
     bool processMemAccess(Instruction *I);
     bool processCmp(CmpInst *C);
     bool processSwitch(SwitchInst *SI);
+    bool processCallSite(CallSite CS);
 
   public:
     static char ID;
@@ -53,6 +56,7 @@ namespace {
 
     void getAnalysisUsage(AnalysisUsage &AU) const override {
       AU.addRequired<LazyValueInfo>();
+      AU.addPreserved<GlobalsAAWrapperPass>();
     }
   };
 }
@@ -102,32 +106,53 @@ bool CorrelatedValuePropagation::processPHI(PHINode *P) {
 
     Value *V = LVI->getConstantOnEdge(Incoming, P->getIncomingBlock(i), BB, P);
 
-    // Look if the incoming value is a select with a constant but LVI tells us
-    // that the incoming value can never be that constant. In that case replace
-    // the incoming value with the other value of the select. This often allows
-    // us to remove the select later.
+    // Look if the incoming value is a select with a scalar condition for which
+    // LVI can tells us the value. In that case replace the incoming value with
+    // the appropriate value of the select. This often allows us to remove the
+    // select later.
     if (!V) {
       SelectInst *SI = dyn_cast<SelectInst>(Incoming);
       if (!SI) continue;
 
-      Constant *C = dyn_cast<Constant>(SI->getFalseValue());
-      if (!C) continue;
+      Value *Condition = SI->getCondition();
+      if (!Condition->getType()->isVectorTy()) {
+        if (Constant *C = LVI->getConstantOnEdge(
+                Condition, P->getIncomingBlock(i), BB, P)) {
+          if (C->isOneValue()) {
+            V = SI->getTrueValue();
+          } else if (C->isZeroValue()) {
+            V = SI->getFalseValue();
+          }
+          // Once LVI learns to handle vector types, we could also add support
+          // for vector type constants that are not all zeroes or all ones.
+        }
+      }
 
-      if (LVI->getPredicateOnEdge(ICmpInst::ICMP_EQ, SI, C,
-                                  P->getIncomingBlock(i), BB, P) !=
-          LazyValueInfo::False)
-        continue;
+      // Look if the select has a constant but LVI tells us that the incoming
+      // value can never be that constant. In that case replace the incoming
+      // value with the other value of the select. This often allows us to
+      // remove the select later.
+      if (!V) {
+        Constant *C = dyn_cast<Constant>(SI->getFalseValue());
+        if (!C) continue;
+
+        if (LVI->getPredicateOnEdge(ICmpInst::ICMP_EQ, SI, C,
+              P->getIncomingBlock(i), BB, P) !=
+            LazyValueInfo::False)
+          continue;
+        V = SI->getTrueValue();
+      }
 
       DEBUG(dbgs() << "CVP: Threading PHI over " << *SI << '\n');
-      V = SI->getTrueValue();
     }
 
     P->setIncomingValue(i, V);
     Changed = true;
   }
 
-  // FIXME: Provide DL, TLI, DT, AT to SimplifyInstruction.
-  if (Value *V = SimplifyInstruction(P)) {
+  // FIXME: Provide TLI, DT, AT to SimplifyInstruction.
+  const DataLayout &DL = BB->getModule()->getDataLayout();
+  if (Value *V = SimplifyInstruction(P, DL)) {
     P->replaceAllUsesWith(V);
     P->eraseFromParent();
     Changed = true;
@@ -285,6 +310,32 @@ bool CorrelatedValuePropagation::processSwitch(SwitchInst *SI) {
   return Changed;
 }
 
+/// processCallSite - Infer nonnull attributes for the arguments at the
+/// specified callsite.
+bool CorrelatedValuePropagation::processCallSite(CallSite CS) {
+  bool Changed = false;
+
+  unsigned ArgNo = 0;
+  for (Value *V : CS.args()) {
+    PointerType *Type = dyn_cast<PointerType>(V->getType());
+
+    if (Type && !CS.paramHasAttr(ArgNo + 1, Attribute::NonNull) &&
+        LVI->getPredicateAt(ICmpInst::ICMP_EQ, V,
+                            ConstantPointerNull::get(Type),
+                            CS.getInstruction()) == LazyValueInfo::False) {
+      AttributeSet AS = CS.getAttributes();
+      AS = AS.addAttribute(CS.getInstruction()->getContext(), ArgNo + 1,
+                           Attribute::NonNull);
+      CS.setAttributes(AS);
+      Changed = true;
+    }
+    ArgNo++;
+  }
+  assert(ArgNo == CS.arg_size() && "sanity check");
+
+  return Changed;
+}
+
 bool CorrelatedValuePropagation::runOnFunction(Function &F) {
   if (skipOptnoneFunction(F))
     return false;
@@ -311,6 +362,10 @@ bool CorrelatedValuePropagation::runOnFunction(Function &F) {
       case Instruction::Load:
       case Instruction::Store:
         BBChanged |= processMemAccess(II);
+        break;
+      case Instruction::Call:
+      case Instruction::Invoke:
+        BBChanged |= processCallSite(CallSite(II));
         break;
       }
     }

@@ -15,16 +15,16 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/MutexGuard.h"
 #include <algorithm>
 #include <cstring>
 #include <map>
 #include <string>
 #include <vector>
-#include "llvm/Support/ManagedStatic.h"
-#include "llvm/IR/InstIterator.h"
-#include "llvm/Support/MutexGuard.h"
 
 using namespace llvm;
 
@@ -52,7 +52,7 @@ static void cacheAnnotationFromMD(const MDNode *md, key_val_pair_t &retval) {
     assert(prop && "Annotation property not a string");
 
     // value
-    ConstantInt *Val = dyn_cast<ConstantInt>(md->getOperand(i + 1));
+    ConstantInt *Val = mdconst::dyn_extract<ConstantInt>(md->getOperand(i + 1));
     assert(Val && "Value operand not a constant int");
 
     std::string keyname = prop->getString().str();
@@ -75,7 +75,8 @@ static void cacheAnnotationFromMD(const Module *m, const GlobalValue *gv) {
   for (unsigned i = 0, e = NMD->getNumOperands(); i != e; ++i) {
     const MDNode *elem = NMD->getOperand(i);
 
-    Value *entity = elem->getOperand(0);
+    GlobalValue *entity =
+        mdconst::dyn_extract_or_null<GlobalValue>(elem->getOperand(0));
     // entity may be null due to DCE
     if (!entity)
       continue;
@@ -292,12 +293,9 @@ bool llvm::isKernelFunction(const Function &F) {
   unsigned x = 0;
   bool retval = llvm::findOneNVVMAnnotation(
       &F, llvm::PropertyAnnotationNames[llvm::PROPERTY_ISKERNEL_FUNCTION], x);
-  if (retval == false) {
+  if (!retval) {
     // There is no NVVM metadata, check the calling convention
-    if (F.getCallingConv() == llvm::CallingConv::PTX_Kernel)
-      return true;
-    else
-      return false;
+    return F.getCallingConv() == llvm::CallingConv::PTX_Kernel;
   }
   return (x == 1);
 }
@@ -306,7 +304,7 @@ bool llvm::getAlign(const Function &F, unsigned index, unsigned &align) {
   std::vector<unsigned> Vs;
   bool retval = llvm::findAllNVVMAnnotation(
       &F, llvm::PropertyAnnotationNames[llvm::PROPERTY_ALIGN], Vs);
-  if (retval == false)
+  if (!retval)
     return false;
   for (int i = 0, e = Vs.size(); i < e; i++) {
     unsigned v = Vs[i];
@@ -322,7 +320,7 @@ bool llvm::getAlign(const CallInst &I, unsigned index, unsigned &align) {
   if (MDNode *alignNode = I.getMetadata("callalign")) {
     for (int i = 0, n = alignNode->getNumOperands(); i < n; i++) {
       if (const ConstantInt *CI =
-              dyn_cast<ConstantInt>(alignNode->getOperand(i))) {
+              mdconst::dyn_extract<ConstantInt>(alignNode->getOperand(i))) {
         unsigned v = CI->getZExtValue();
         if ((v >> 16) == index) {
           align = v & 0xFFFF;
@@ -338,18 +336,16 @@ bool llvm::getAlign(const CallInst &I, unsigned index, unsigned &align) {
 }
 
 bool llvm::isBarrierIntrinsic(Intrinsic::ID id) {
-  if ((id == Intrinsic::nvvm_barrier0) ||
-      (id == Intrinsic::nvvm_barrier0_popc) ||
-      (id == Intrinsic::nvvm_barrier0_and) ||
-      (id == Intrinsic::nvvm_barrier0_or) ||
-      (id == Intrinsic::cuda_syncthreads))
-    return true;
-  return false;
+  return (id == Intrinsic::nvvm_barrier0) ||
+         (id == Intrinsic::nvvm_barrier0_popc) ||
+         (id == Intrinsic::nvvm_barrier0_and) ||
+         (id == Intrinsic::nvvm_barrier0_or) ||
+         (id == Intrinsic::cuda_syncthreads);
 }
 
 // Interface for checking all memory space transfer related intrinsics
 bool llvm::isMemorySpaceTransferIntrinsic(Intrinsic::ID id) {
-  if (id == Intrinsic::nvvm_ptr_local_to_gen ||
+  return id == Intrinsic::nvvm_ptr_local_to_gen ||
       id == Intrinsic::nvvm_ptr_shared_to_gen ||
       id == Intrinsic::nvvm_ptr_global_to_gen ||
       id == Intrinsic::nvvm_ptr_constant_to_gen ||
@@ -357,16 +353,12 @@ bool llvm::isMemorySpaceTransferIntrinsic(Intrinsic::ID id) {
       id == Intrinsic::nvvm_ptr_gen_to_shared ||
       id == Intrinsic::nvvm_ptr_gen_to_local ||
       id == Intrinsic::nvvm_ptr_gen_to_constant ||
-      id == Intrinsic::nvvm_ptr_gen_to_param) {
-    return true;
-  }
-
-  return false;
+      id == Intrinsic::nvvm_ptr_gen_to_param;
 }
 
 // consider several special intrinsics in striping pointer casts, and
-// provide an option to ignore GEP indicies for find out the base address only
-// which could be used in simple alias disambigurate.
+// provide an option to ignore GEP indices for find out the base address only
+// which could be used in simple alias disambiguation.
 const Value *
 llvm::skipPointerTransfer(const Value *V, bool ignore_GEP_indices) {
   V = V->stripPointerCasts();
@@ -387,9 +379,9 @@ llvm::skipPointerTransfer(const Value *V, bool ignore_GEP_indices) {
 }
 
 // consider several special intrinsics in striping pointer casts, and
-// - ignore GEP indicies for find out the base address only, and
+// - ignore GEP indices for find out the base address only, and
 // - tracking PHINode
-// which could be used in simple alias disambigurate.
+// which could be used in simple alias disambiguation.
 const Value *
 llvm::skipPointerTransfer(const Value *V, std::set<const Value *> &processed) {
   if (processed.find(V) != processed.end())
@@ -436,7 +428,7 @@ llvm::skipPointerTransfer(const Value *V, std::set<const Value *> &processed) {
   return V;
 }
 
-// The following are some useful utilities for debuggung
+// The following are some useful utilities for debugging
 
 BasicBlock *llvm::getParentBlock(Value *v) {
   if (BasicBlock *B = dyn_cast<BasicBlock>(v))
@@ -492,7 +484,7 @@ Instruction *llvm::getInst(Value *base, char *instName) {
   return nullptr;
 }
 
-// Dump an instruction by nane
+// Dump an instruction by name
 void llvm::dumpInst(Value *base, char *instName) {
   Instruction *I = getInst(base, instName);
   if (I)

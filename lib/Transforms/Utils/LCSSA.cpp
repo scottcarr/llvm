@@ -31,8 +31,10 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionAliasAnalysis.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
@@ -61,7 +63,7 @@ static bool isExitBlock(BasicBlock *BB,
 /// uses.
 static bool processInstruction(Loop &L, Instruction &Inst, DominatorTree &DT,
                                const SmallVectorImpl<BasicBlock *> &ExitBlocks,
-                               PredIteratorCache &PredCache) {
+                               PredIteratorCache &PredCache, LoopInfo *LI) {
   SmallVector<Use *, 16> UsesToRewrite;
 
   BasicBlock *InstBB = Inst.getParent();
@@ -82,18 +84,20 @@ static bool processInstruction(Loop &L, Instruction &Inst, DominatorTree &DT,
 
   ++NumLCSSA; // We are applying the transformation
 
-  // Invoke instructions are special in that their result value is not available
-  // along their unwind edge. The code below tests to see whether DomBB
-  // dominates
-  // the value, so adjust DomBB to the normal destination block, which is
-  // effectively where the value is first usable.
+  // Invoke/CatchPad instructions are special in that their result value is not
+  // available along their unwind edge. The code below tests to see whether
+  // DomBB dominates the value, so adjust DomBB to the normal destination block,
+  // which is effectively where the value is first usable.
   BasicBlock *DomBB = Inst.getParent();
   if (InvokeInst *Inv = dyn_cast<InvokeInst>(&Inst))
     DomBB = Inv->getNormalDest();
+  if (auto *CPI = dyn_cast<CatchPadInst>(&Inst))
+    DomBB = CPI->getNormalDest();
 
   DomTreeNode *DomNode = DT.getNode(DomBB);
 
   SmallVector<PHINode *, 16> AddedPHIs;
+  SmallVector<PHINode *, 8> PostProcessPHIs;
 
   SSAUpdater SSAUpdate;
   SSAUpdate.Initialize(Inst.getType(), Inst.getName());
@@ -111,17 +115,17 @@ static bool processInstruction(Loop &L, Instruction &Inst, DominatorTree &DT,
     if (SSAUpdate.HasValueForBlock(ExitBB))
       continue;
 
-    PHINode *PN = PHINode::Create(Inst.getType(), PredCache.GetNumPreds(ExitBB),
+    PHINode *PN = PHINode::Create(Inst.getType(), PredCache.size(ExitBB),
                                   Inst.getName() + ".lcssa", ExitBB->begin());
 
     // Add inputs from inside the loop for this PHI.
-    for (BasicBlock **PI = PredCache.GetPreds(ExitBB); *PI; ++PI) {
-      PN->addIncoming(&Inst, *PI);
+    for (BasicBlock *Pred : PredCache.get(ExitBB)) {
+      PN->addIncoming(&Inst, Pred);
 
       // If the exit block has a predecessor not within the loop, arrange for
       // the incoming value use corresponding to that predecessor to be
       // rewritten in terms of a different LCSSA PHI.
-      if (!L.contains(*PI))
+      if (!L.contains(Pred))
         UsesToRewrite.push_back(
             &PN->getOperandUse(PN->getOperandNumForIncomingValue(
                  PN->getNumIncomingValues() - 1)));
@@ -131,6 +135,18 @@ static bool processInstruction(Loop &L, Instruction &Inst, DominatorTree &DT,
 
     // Remember that this phi makes the value alive in this block.
     SSAUpdate.AddAvailableValue(ExitBB, PN);
+
+    // LoopSimplify might fail to simplify some loops (e.g. when indirect
+    // branches are involved). In such situations, it might happen that an exit
+    // for Loop L1 is the header of a disjoint Loop L2. Thus, when we create
+    // PHIs in such an exit block, we are also inserting PHIs into L2's header.
+    // This could break LCSSA form for L2 because these inserted PHIs can also
+    // have uses outside of L2. Remember all PHIs in such situation as to
+    // revisit than later on. FIXME: Remove this if indirectbr support into
+    // LoopSimplify gets improved.
+    if (auto *OtherLoop = LI->getLoopFor(ExitBB))
+      if (!L.contains(OtherLoop))
+        PostProcessPHIs.push_back(PN);
   }
 
   // Rewrite all uses outside the loop in terms of the new PHIs we just
@@ -157,6 +173,25 @@ static bool processInstruction(Loop &L, Instruction &Inst, DominatorTree &DT,
     SSAUpdate.RewriteUse(*UsesToRewrite[i]);
   }
 
+  // Post process PHI instructions that were inserted into another disjoint loop
+  // and update their exits properly.
+  for (auto *I : PostProcessPHIs) {
+    if (I->use_empty())
+      continue;
+
+    BasicBlock *PHIBB = I->getParent();
+    Loop *OtherLoop = LI->getLoopFor(PHIBB);
+    SmallVector<BasicBlock *, 8> EBs;
+    OtherLoop->getExitBlocks(EBs);
+    if (EBs.empty())
+      continue;
+
+    // Recurse and re-process each PHI instruction. FIXME: we should really
+    // convert this entire thing to a worklist approach where we process a
+    // vector of instructions...
+    processInstruction(*OtherLoop, *I, DT, EBs, PredCache, LI);
+  }
+
   // Remove PHI nodes that did not have any uses rewritten.
   for (unsigned i = 0, e = AddedPHIs.size(); i != e; ++i) {
     if (AddedPHIs[i]->use_empty())
@@ -180,7 +215,8 @@ blockDominatesAnExit(BasicBlock *BB,
   return false;
 }
 
-bool llvm::formLCSSA(Loop &L, DominatorTree &DT, ScalarEvolution *SE) {
+bool llvm::formLCSSA(Loop &L, DominatorTree &DT, LoopInfo *LI,
+                     ScalarEvolution *SE) {
   bool Changed = false;
 
   // Get the set of exiting blocks.
@@ -212,7 +248,7 @@ bool llvm::formLCSSA(Loop &L, DominatorTree &DT, ScalarEvolution *SE) {
            !isa<PHINode>(I->user_back())))
         continue;
 
-      Changed |= processInstruction(L, *I, DT, ExitBlocks, PredCache);
+      Changed |= processInstruction(L, *I, DT, ExitBlocks, PredCache, LI);
     }
   }
 
@@ -228,15 +264,15 @@ bool llvm::formLCSSA(Loop &L, DominatorTree &DT, ScalarEvolution *SE) {
 }
 
 /// Process a loop nest depth first.
-bool llvm::formLCSSARecursively(Loop &L, DominatorTree &DT,
+bool llvm::formLCSSARecursively(Loop &L, DominatorTree &DT, LoopInfo *LI,
                                 ScalarEvolution *SE) {
   bool Changed = false;
 
   // Recurse depth-first through inner loops.
-  for (Loop::iterator LI = L.begin(), LE = L.end(); LI != LE; ++LI)
-    Changed |= formLCSSARecursively(**LI, DT, SE);
+  for (Loop::iterator I = L.begin(), E = L.end(); I != E; ++I)
+    Changed |= formLCSSARecursively(**I, DT, LI, SE);
 
-  Changed |= formLCSSA(L, DT, SE);
+  Changed |= formLCSSA(L, DT, LI, SE);
   return Changed;
 }
 
@@ -261,21 +297,22 @@ struct LCSSA : public FunctionPass {
     AU.setPreservesCFG();
 
     AU.addRequired<DominatorTreeWrapperPass>();
-    AU.addRequired<LoopInfo>();
+    AU.addRequired<LoopInfoWrapperPass>();
     AU.addPreservedID(LoopSimplifyID);
-    AU.addPreserved<AliasAnalysis>();
-    AU.addPreserved<ScalarEvolution>();
+    AU.addPreserved<AAResultsWrapperPass>();
+    AU.addPreserved<GlobalsAAWrapperPass>();
+    AU.addPreserved<ScalarEvolutionWrapperPass>();
+    AU.addPreserved<SCEVAAWrapperPass>();
   }
-
-private:
-  void verifyAnalysis() const override;
 };
 }
 
 char LCSSA::ID = 0;
 INITIALIZE_PASS_BEGIN(LCSSA, "lcssa", "Loop-Closed SSA Form Pass", false, false)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(LoopInfo)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(SCEVAAWrapperPass)
 INITIALIZE_PASS_END(LCSSA, "lcssa", "Loop-Closed SSA Form Pass", false, false)
 
 Pass *llvm::createLCSSAPass() { return new LCSSA(); }
@@ -285,29 +322,15 @@ char &llvm::LCSSAID = LCSSA::ID;
 /// Process all loops in the function, inner-most out.
 bool LCSSA::runOnFunction(Function &F) {
   bool Changed = false;
-  LI = &getAnalysis<LoopInfo>();
+  LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
-  SE = getAnalysisIfAvailable<ScalarEvolution>();
+  auto *SEWP = getAnalysisIfAvailable<ScalarEvolutionWrapperPass>();
+  SE = SEWP ? &SEWP->getSE() : nullptr;
 
   // Simplify each loop nest in the function.
   for (LoopInfo::iterator I = LI->begin(), E = LI->end(); I != E; ++I)
-    Changed |= formLCSSARecursively(**I, *DT, SE);
+    Changed |= formLCSSARecursively(**I, *DT, LI, SE);
 
   return Changed;
 }
 
-static void verifyLoop(Loop &L, DominatorTree &DT) {
-  // Recurse depth-first through inner loops.
-  for (Loop::iterator LI = L.begin(), LE = L.end(); LI != LE; ++LI)
-    verifyLoop(**LI, DT);
-
-  // Check the special guarantees that LCSSA makes.
-  //assert(L.isLCSSAForm(DT) && "LCSSA form not preserved!");
-}
-
-void LCSSA::verifyAnalysis() const {
-  // Verify each loop nest in the function, assuming LI still points at that
-  // function's loop info.
-  for (LoopInfo::iterator I = LI->begin(), E = LI->end(); I != E; ++I)
-    verifyLoop(**I, *DT);
-}

@@ -32,6 +32,9 @@ def FeatureCrypto : SubtargetFeature<"crypto", "HasCrypto", "true",
 def FeatureCRC : SubtargetFeature<"crc", "HasCRC", "true",
   "Enable ARMv8 CRC-32 checksum instructions">;
 
+def FeaturePerfMon : SubtargetFeature<"perfmon", "HasPerfMon", "true",
+  "Enable ARMv8 PMUv3 Performance Monitors extension">;
+
 /// Cyclone has register move instructions which are "free".
 def FeatureZCRegMove : SubtargetFeature<"zcm", "HasZeroCycleRegMove", "true",
                                         "Has zero-cycle register moves">;
@@ -39,6 +42,22 @@ def FeatureZCRegMove : SubtargetFeature<"zcm", "HasZeroCycleRegMove", "true",
 /// Cyclone has instructions which zero registers for "free".
 def FeatureZCZeroing : SubtargetFeature<"zcz", "HasZeroCycleZeroing", "true",
                                         "Has zero-cycle zeroing instructions">;
+
+def FeatureStrictAlign : SubtargetFeature<"strict-align",
+                                          "StrictAlign", "true",
+                                          "Disallow all unaligned memory "
+                                          "access">;
+
+def FeatureReserveX18 : SubtargetFeature<"reserve-x18", "ReserveX18", "true",
+                                         "Reserve X18, making it unavailable "
+                                         "as a GPR">;
+
+//===----------------------------------------------------------------------===//
+// Architectures.
+//
+
+def HasV8_1aOps : SubtargetFeature<"v8.1a", "HasV8_1aOps", "true",
+  "Support ARM v8.1a instructions", [FeatureCRC]>;
 
 //===----------------------------------------------------------------------===//
 // Register File Description
@@ -68,14 +87,16 @@ def ProcA53     : SubtargetFeature<"a53", "ARMProcFamily", "CortexA53",
                                    [FeatureFPARMv8,
                                    FeatureNEON,
                                    FeatureCrypto,
-                                   FeatureCRC]>;
+                                   FeatureCRC,
+                                   FeaturePerfMon]>;
 
 def ProcA57     : SubtargetFeature<"a57", "ARMProcFamily", "CortexA57",
                                    "Cortex-A57 ARM processors",
                                    [FeatureFPARMv8,
                                    FeatureNEON,
                                    FeatureCrypto,
-                                   FeatureCRC]>;
+                                   FeatureCRC,
+                                   FeaturePerfMon]>;
 
 def ProcCyclone : SubtargetFeature<"cyclone", "ARMProcFamily", "Cyclone",
                                    "Cyclone",
@@ -83,14 +104,18 @@ def ProcCyclone : SubtargetFeature<"cyclone", "ARMProcFamily", "Cyclone",
                                    FeatureNEON,
                                    FeatureCrypto,
                                    FeatureCRC,
+                                   FeaturePerfMon,
                                    FeatureZCRegMove, FeatureZCZeroing]>;
 
 def : ProcessorModel<"generic", NoSchedModel, [FeatureFPARMv8,
                                               FeatureNEON,
-                                              FeatureCRC]>;
+                                              FeatureCRC,
+                                              FeaturePerfMon]>;
 
 def : ProcessorModel<"cortex-a53", CortexA53Model, [ProcA53]>;
 def : ProcessorModel<"cortex-a57", CortexA57Model, [ProcA57]>;
+// FIXME: Cortex-A72 is currently modelled as an Cortex-A57.
+def : ProcessorModel<"cortex-a72", CortexA57Model, [ProcA57]>;
 def : ProcessorModel<"cyclone", CycloneModel, [ProcCyclone]>;
 
 //===----------------------------------------------------------------------===//
@@ -114,12 +139,14 @@ def AppleAsmParserVariant : AsmParserVariant {
 // AsmWriter bits get associated with the correct class.
 def GenericAsmWriter : AsmWriter {
   string AsmWriterClassName  = "InstPrinter";
+  int PassSubtarget = 1;
   int Variant = 0;
   bit isMCAsmWriter = 1;
 }
 
 def AppleAsmWriter : AsmWriter {
   let AsmWriterClassName = "AppleInstPrinter";
+  int PassSubtarget = 1;
   int Variant = 1;
   int isMCAsmWriter = 1;
 }

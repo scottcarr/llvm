@@ -10,44 +10,92 @@
 #ifndef LLVM_LINKER_LINKER_H
 #define LLVM_LINKER_LINKER_H
 
-#include "llvm/ADT/SmallPtrSet.h"
-
-#include <functional>
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/IR/DiagnosticInfo.h"
 
 namespace llvm {
-class DiagnosticInfo;
 class Module;
 class StructType;
+class Type;
 
 /// This class provides the core functionality of linking in LLVM. It keeps a
 /// pointer to the merged module so far. It doesn't take ownership of the
 /// module since it is assumed that the user of this class will want to do
 /// something with it after the linking.
 class Linker {
-  public:
-    typedef std::function<void(const DiagnosticInfo &)>
-        DiagnosticHandlerFunction;
+public:
+  struct StructTypeKeyInfo {
+    struct KeyTy {
+      ArrayRef<Type *> ETypes;
+      bool IsPacked;
+      KeyTy(ArrayRef<Type *> E, bool P);
+      KeyTy(const StructType *ST);
+      bool operator==(const KeyTy &that) const;
+      bool operator!=(const KeyTy &that) const;
+    };
+    static StructType *getEmptyKey();
+    static StructType *getTombstoneKey();
+    static unsigned getHashValue(const KeyTy &Key);
+    static unsigned getHashValue(const StructType *ST);
+    static bool isEqual(const KeyTy &LHS, const StructType *RHS);
+    static bool isEqual(const StructType *LHS, const StructType *RHS);
+  };
 
-    Linker(Module *M, DiagnosticHandlerFunction DiagnosticHandler);
-    Linker(Module *M);
-    ~Linker();
+  typedef DenseSet<StructType *, StructTypeKeyInfo> NonOpaqueStructTypeSet;
+  typedef DenseSet<StructType *> OpaqueStructTypeSet;
 
-    Module *getModule() const { return Composite; }
-    void deleteModule();
+  struct IdentifiedStructTypeSet {
+    // The set of opaque types is the composite module.
+    OpaqueStructTypeSet OpaqueStructTypes;
 
-    /// \brief Link \p Src into the composite. The source is destroyed.
-    /// Returns true on error.
-    bool linkInModule(Module *Src);
+    // The set of identified but non opaque structures in the composite module.
+    NonOpaqueStructTypeSet NonOpaqueStructTypes;
 
-    static bool LinkModules(Module *Dest, Module *Src,
-                            DiagnosticHandlerFunction DiagnosticHandler);
+    void addNonOpaque(StructType *Ty);
+    void switchToNonOpaque(StructType *Ty);
+    void addOpaque(StructType *Ty);
+    StructType *findNonOpaque(ArrayRef<Type *> ETypes, bool IsPacked);
+    bool hasType(StructType *Ty);
+  };
 
-    static bool LinkModules(Module *Dest, Module *Src);
+  enum Flags {
+    None = 0,
+    OverrideFromSrc = (1 << 0),
+    LinkOnlyNeeded = (1 << 1),
+    InternalizeLinkedSymbols = (1 << 2)
+  };
 
-  private:
-    Module *Composite;
-    SmallPtrSet<StructType*, 32> IdentifiedStructTypes;
-    DiagnosticHandlerFunction DiagnosticHandler;
+  Linker(Module *M, DiagnosticHandlerFunction DiagnosticHandler);
+  Linker(Module *M);
+
+  Module *getModule() const { return Composite; }
+  void deleteModule();
+
+  /// \brief Link \p Src into the composite. The source is destroyed.
+  /// Passing OverrideSymbols as true will have symbols from Src
+  /// shadow those in the Dest.
+  /// Returns true on error.
+  bool linkInModule(Module *Src, unsigned Flags = Flags::None);
+
+  /// \brief Set the composite to the passed-in module.
+  void setModule(Module *Dst);
+
+  static bool LinkModules(Module *Dest, Module *Src,
+                          DiagnosticHandlerFunction DiagnosticHandler,
+                          unsigned Flags = Flags::None);
+
+  static bool LinkModules(Module *Dest, Module *Src,
+                          unsigned Flags = Flags::None);
+
+private:
+  void init(Module *M, DiagnosticHandlerFunction DiagnosticHandler);
+  Module *Composite;
+
+  IdentifiedStructTypeSet IdentifiedStructTypes;
+
+  DiagnosticHandlerFunction DiagnosticHandler;
 };
 
 } // End llvm namespace

@@ -11,6 +11,7 @@ add_llvm_library(LLVMCore
   DIBuilder.cpp
   DataLayout.cpp
   DebugInfo.cpp
+  DebugInfoMetadata.cpp
   DebugLoc.cpp
   DiagnosticInfo.cpp
   DiagnosticPrinter.cpp
@@ -27,24 +28,36 @@ add_llvm_library(LLVMCore
   IntrinsicInst.cpp
   LLVMContext.cpp
   LLVMContextImpl.cpp
-  LeakDetector.cpp
   LegacyPassManager.cpp
   MDBuilder.cpp
   Mangler.cpp
   Metadata.cpp
+  MetadataTracking.cpp
   Module.cpp
+  Operator.cpp
   Pass.cpp
   PassManager.cpp
   PassRegistry.cpp
+  Statepoint.cpp
   Type.cpp
   TypeFinder.cpp
   Use.cpp
-  UseListOrder.cpp
   User.cpp
   Value.cpp
   ValueSymbolTable.cpp
   ValueTypes.cpp
   Verifier.cpp
+
+  ADDITIONAL_HEADER_DIRS
+  ${LLVM_MAIN_INCLUDE_DIR}/llvm/IR
   )
+
+# PR24785: Workaround for hanging compilation.
+if( MSVC_VERSION EQUAL 1800)
+  set_property(
+    SOURCE Function.cpp
+    PROPERTY COMPILE_FLAGS "/Og-"
+    )
+endif()
 
 add_dependencies(LLVMCore intrinsics_gen)

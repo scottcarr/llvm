@@ -35,19 +35,20 @@ class ModuleInfo;
 class LLVMSymbolizer {
 public:
   struct Options {
-    bool UseSymbolTable : 1;
     FunctionNameKind PrintFunctions;
+    bool UseSymbolTable : 1;
     bool PrintInlining : 1;
     bool Demangle : 1;
+    bool RelativeAddresses : 1;
     std::string DefaultArch;
     std::vector<std::string> DsymHints;
-    Options(bool UseSymbolTable = true,
-            FunctionNameKind PrintFunctions = FunctionNameKind::LinkageName,
-            bool PrintInlining = true, bool Demangle = true,
+    Options(FunctionNameKind PrintFunctions = FunctionNameKind::LinkageName,
+            bool UseSymbolTable = true, bool PrintInlining = true,
+            bool Demangle = true, bool RelativeAddresses = false,
             std::string DefaultArch = "")
-        : UseSymbolTable(UseSymbolTable),
-          PrintFunctions(PrintFunctions), PrintInlining(PrintInlining),
-          Demangle(Demangle), DefaultArch(DefaultArch) {}
+        : PrintFunctions(PrintFunctions), UseSymbolTable(UseSymbolTable),
+          PrintInlining(PrintInlining), Demangle(Demangle),
+          RelativeAddresses(RelativeAddresses), DefaultArch(DefaultArch) {}
   };
 
   LLVMSymbolizer(const Options &Opts = Options()) : Opts(Opts) {}
@@ -62,7 +63,8 @@ public:
   std::string
   symbolizeData(const std::string &ModuleName, uint64_t ModuleOffset);
   void flush();
-  static std::string DemangleName(const std::string &Name);
+  static std::string DemangleName(const std::string &Name, ModuleInfo *ModInfo);
+
 private:
   typedef std::pair<ObjectFile*, ObjectFile*> ObjectPair;
 
@@ -77,7 +79,7 @@ private:
   /// universal binary (or the binary itself if it is an object file).
   ObjectFile *getObjectFileFromBinary(Binary *Bin, const std::string &ArchName);
 
-  std::string printDILineInfo(DILineInfo LineInfo) const;
+  std::string printDILineInfo(DILineInfo LineInfo, ModuleInfo *ModInfo) const;
 
   // Owns all the parsed binaries and object files.
   SmallVector<std::unique_ptr<Binary>, 4> ParsedBinariesAndObjects;
@@ -112,13 +114,16 @@ public:
   bool symbolizeData(uint64_t ModuleOffset, std::string &Name, uint64_t &Start,
                      uint64_t &Size) const;
 
+  // Return true if this is a 32-bit x86 PE COFF module.
+  bool isWin32Module() const;
+
 private:
   bool getNameFromSymbolTable(SymbolRef::Type Type, uint64_t Address,
                               std::string &Name, uint64_t &Addr,
                               uint64_t &Size) const;
   // For big-endian PowerPC64 ELF, OpdAddress is the address of the .opd
   // (function descriptor) section and OpdExtractor refers to its contents.
-  void addSymbol(const SymbolRef &Symbol,
+  void addSymbol(const SymbolRef &Symbol, uint64_t SymbolSize,
                  DataExtractor *OpdExtractor = nullptr,
                  uint64_t OpdAddress = 0);
   ObjectFile *Module;

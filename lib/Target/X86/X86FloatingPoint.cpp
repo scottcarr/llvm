@@ -32,10 +32,10 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/EdgeBundles.h"
+#include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/Support/Debug.h"
@@ -120,12 +120,10 @@ namespace {
     // Return a bitmask of FP registers in block's live-in list.
     static unsigned calcLiveInMask(MachineBasicBlock *MBB) {
       unsigned Mask = 0;
-      for (MachineBasicBlock::livein_iterator I = MBB->livein_begin(),
-           E = MBB->livein_end(); I != E; ++I) {
-        unsigned Reg = *I;
-        if (Reg < X86::FP0 || Reg > X86::FP6)
+      for (const auto &LI : MBB->liveins()) {
+        if (LI.PhysReg < X86::FP0 || LI.PhysReg > X86::FP6)
           continue;
-        Mask |= 1 << (Reg - X86::FP0);
+        Mask |= 1 << (LI.PhysReg - X86::FP0);
       }
       return Mask;
     }
@@ -300,9 +298,10 @@ bool FPS::runOnMachineFunction(MachineFunction &MF) {
   // function.  If it is all integer, there is nothing for us to do!
   bool FPIsUsed = false;
 
-  assert(X86::FP6 == X86::FP0+6 && "Register enums aren't sorted right!");
+  static_assert(X86::FP6 == X86::FP0+6, "Register enums aren't sorted right!");
+  const MachineRegisterInfo &MRI = MF.getRegInfo();
   for (unsigned i = 0; i <= 6; ++i)
-    if (MF.getRegInfo().isPhysRegUsed(X86::FP0+i)) {
+    if (!MRI.reg_nodbg_empty(X86::FP0 + i)) {
       FPIsUsed = true;
       break;
     }
@@ -330,7 +329,7 @@ bool FPS::runOnMachineFunction(MachineFunction &MF) {
   // Process any unreachable blocks in arbitrary order now.
   if (MF.size() != Processed.size())
     for (MachineFunction::iterator BB = MF.begin(), E = MF.end(); BB != E; ++BB)
-      if (Processed.insert(BB))
+      if (Processed.insert(BB).second)
         Changed |= processBasicBlock(MF, *BB);
 
   LiveBundles.clear();
@@ -438,7 +437,7 @@ bool FPS::processBasicBlock(MachineFunction &MF, MachineBasicBlock &BB) {
         // Rewind to first instruction newly inserted.
         while (Start != BB.begin() && std::prev(Start) != PrevI) --Start;
         dbgs() << "Inserted instructions:\n\t";
-        Start->print(dbgs(), &MF.getTarget());
+        Start->print(dbgs());
         while (++Start != std::next(I)) {}
       }
       dumpStack();
@@ -898,7 +897,7 @@ void FPS::adjustLiveRegs(unsigned Mask, MachineBasicBlock::iterator I) {
 
   // Now we should have the correct registers live.
   DEBUG(dumpStack());
-  assert(StackTop == CountPopulation_32(Mask) && "Live count mismatch");
+  assert(StackTop == countPopulation(Mask) && "Live count mismatch");
 }
 
 /// shuffleStackTop - emit fxch instructions before I to shuffle the top
@@ -943,7 +942,7 @@ void FPS::handleCall(MachineBasicBlock::iterator &I) {
     }
   }
 
-  unsigned N = CountTrailingOnes_32(STReturns);
+  unsigned N = countTrailingOnes(STReturns);
 
   // FP registers used for function return must be consecutive starting at
   // FP0.
@@ -1420,14 +1419,14 @@ void FPS::handleSpecialFP(MachineBasicBlock::iterator &Inst) {
 
     if (STUses && !isMask_32(STUses))
       MI->emitError("fixed input regs must be last on the x87 stack");
-    unsigned NumSTUses = CountTrailingOnes_32(STUses);
+    unsigned NumSTUses = countTrailingOnes(STUses);
 
     // Defs must be contiguous from the stack top. ST0-STn.
     if (STDefs && !isMask_32(STDefs)) {
       MI->emitError("output regs must be last on the x87 stack");
       STDefs = NextPowerOf2(STDefs) - 1;
     }
-    unsigned NumSTDefs = CountTrailingOnes_32(STDefs);
+    unsigned NumSTDefs = countTrailingOnes(STDefs);
 
     // So must the clobbered stack slots. ST0-STm, m >= n.
     if (STClobbers && !isMask_32(STDefs | STClobbers))
@@ -1437,7 +1436,7 @@ void FPS::handleSpecialFP(MachineBasicBlock::iterator &Inst) {
     unsigned STPopped = STUses & (STDefs | STClobbers);
     if (STPopped && !isMask_32(STPopped))
       MI->emitError("implicitly popped regs must be last on the x87 stack");
-    unsigned NumSTPopped = CountTrailingOnes_32(STPopped);
+    unsigned NumSTPopped = countTrailingOnes(STPopped);
 
     DEBUG(dbgs() << "Asm uses " << NumSTUses << " fixed regs, pops "
                  << NumSTPopped << ", and defines " << NumSTDefs << " regs.\n");
@@ -1518,31 +1517,6 @@ void FPS::handleSpecialFP(MachineBasicBlock::iterator &Inst) {
 
     // Don't delete the inline asm!
     return;
-  }
-
-  case X86::WIN_FTOL_32:
-  case X86::WIN_FTOL_64: {
-    // Push the operand into ST0.
-    MachineOperand &Op = MI->getOperand(0);
-    assert(Op.isUse() && Op.isReg() &&
-      Op.getReg() >= X86::FP0 && Op.getReg() <= X86::FP6);
-    unsigned FPReg = getFPReg(Op);
-    if (Op.isKill())
-      moveToTop(FPReg, Inst);
-    else
-      duplicateToTop(FPReg, FPReg, Inst);
-
-    // Emit the call. This will pop the operand.
-    BuildMI(*MBB, Inst, MI->getDebugLoc(), TII->get(X86::CALLpcrel32))
-      .addExternalSymbol("_ftol2")
-      .addReg(X86::ST0, RegState::ImplicitKill)
-      .addReg(X86::ECX, RegState::ImplicitDefine)
-      .addReg(X86::EAX, RegState::Define | RegState::Implicit)
-      .addReg(X86::EDX, RegState::Define | RegState::Implicit)
-      .addReg(X86::EFLAGS, RegState::Define | RegState::Implicit);
-    --StackTop;
-
-    break;
   }
 
   case X86::RETQ:

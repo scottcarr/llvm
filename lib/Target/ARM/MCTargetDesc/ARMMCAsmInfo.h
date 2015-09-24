@@ -19,32 +19,37 @@
 #include "llvm/MC/MCAsmInfoELF.h"
 
 namespace llvm {
+class Triple;
 
-  class ARMMCAsmInfoDarwin : public MCAsmInfoDarwin {
-    void anchor() override;
-  public:
-    explicit ARMMCAsmInfoDarwin(StringRef TT);
-  };
+class ARMMCAsmInfoDarwin : public MCAsmInfoDarwin {
+  virtual void anchor();
 
-  class ARMELFMCAsmInfo : public MCAsmInfoELF {
-    void anchor() override;
-  public:
-    explicit ARMELFMCAsmInfo(StringRef TT);
+public:
+  explicit ARMMCAsmInfoDarwin(const Triple &TheTriple);
+};
 
-    void setUseIntegratedAssembler(bool Value) override;
-  };
+class ARMELFMCAsmInfo : public MCAsmInfoELF {
+  void anchor() override;
 
-  class ARMCOFFMCAsmInfoMicrosoft : public MCAsmInfoMicrosoft {
-    void anchor() override;
-  public:
-    explicit ARMCOFFMCAsmInfoMicrosoft();
-  };
+public:
+  explicit ARMELFMCAsmInfo(const Triple &TT);
 
-  class ARMCOFFMCAsmInfoGNU : public MCAsmInfoGNUCOFF {
-    void anchor() override;
-  public:
-    explicit ARMCOFFMCAsmInfoGNU();
-  };
+  void setUseIntegratedAssembler(bool Value) override;
+};
+
+class ARMCOFFMCAsmInfoMicrosoft : public MCAsmInfoMicrosoft {
+  void anchor() override;
+
+public:
+  explicit ARMCOFFMCAsmInfoMicrosoft();
+};
+
+class ARMCOFFMCAsmInfoGNU : public MCAsmInfoGNUCOFF {
+  void anchor() override;
+
+public:
+  explicit ARMCOFFMCAsmInfoGNU();
+};
 
 } // namespace llvm
 

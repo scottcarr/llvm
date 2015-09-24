@@ -195,16 +195,16 @@ public:
   /// then return NULL.
   Pass *findAnalysisPass(AnalysisID AID);
 
+  /// Retrieve the PassInfo for an analysis.
+  const PassInfo *findAnalysisPassInfo(AnalysisID AID) const;
+
   /// Find analysis usage information for the pass P.
   AnalysisUsage *findAnalysisUsage(Pass *P);
 
   virtual ~PMTopLevelManager();
 
   /// Add immutable pass and initialize it.
-  inline void addImmutablePass(ImmutablePass *P) {
-    P->initializePass();
-    ImmutablePasses.push_back(P);
-  }
+  void addImmutablePass(ImmutablePass *P);
 
   inline SmallVectorImpl<ImmutablePass *>& getImmutablePasses() {
     return ImmutablePasses;
@@ -250,7 +250,16 @@ private:
   /// Immutable passes are managed by top level manager.
   SmallVector<ImmutablePass *, 16> ImmutablePasses;
 
+  /// Map from ID to immutable passes.
+  SmallDenseMap<AnalysisID, ImmutablePass *, 8> ImmutablePassMap;
+
   DenseMap<Pass *, AnalysisUsage *> AnUsageMap;
+
+  /// Collection of PassInfo objects found via analysis IDs and in this top
+  /// level manager. This is used to memoize queries to the pass registry.
+  /// FIXME: This is an egregious hack because querying the pass registry is
+  /// either slow or racy.
+  mutable DenseMap<AnalysisID, const PassInfo *> AnalysisPassInfos;
 };
 
 
@@ -311,12 +320,12 @@ public:
   bool preserveHigherLevelAnalysis(Pass *P);
 
 
-  /// Populate RequiredPasses with analysis pass that are required by
-  /// pass P and are available. Populate ReqPassNotAvailable with analysis
-  /// pass that are required by pass P but are not available.
-  void collectRequiredAnalysis(SmallVectorImpl<Pass *> &RequiredPasses,
-                               SmallVectorImpl<AnalysisID> &ReqPassNotAvailable,
-                               Pass *P);
+  /// Populate UsedPasses with analysis pass that are used or required by pass
+  /// P and are available. Populate ReqPassNotAvailable with analysis pass that
+  /// are required by pass P but are not available.
+  void collectRequiredAndUsedAnalyses(
+      SmallVectorImpl<Pass *> &UsedPasses,
+      SmallVectorImpl<AnalysisID> &ReqPassNotAvailable, Pass *P);
 
   /// All Required analyses should be available to the pass as it runs!  Here
   /// we fill in the AnalysisImpls member of the pass so that it can
@@ -342,6 +351,7 @@ public:
                     enum PassDebuggingString S2, StringRef Msg);
   void dumpRequiredSet(const Pass *P) const;
   void dumpPreservedSet(const Pass *P) const;
+  void dumpUsedSet(const Pass *P) const;
 
   unsigned getNumContainedPasses() const {
     return (unsigned)PassVector.size();

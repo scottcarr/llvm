@@ -40,6 +40,8 @@ void DecodeMOVSLDUPMask(MVT VT, SmallVectorImpl<int> &ShuffleMask);
 
 void DecodeMOVSHDUPMask(MVT VT, SmallVectorImpl<int> &ShuffleMask);
 
+void DecodeMOVDDUPMask(MVT VT, SmallVectorImpl<int> &ShuffleMask);
+
 void DecodePSLLDQMask(MVT VT, unsigned Imm, SmallVectorImpl<int> &ShuffleMask);
 
 void DecodePSRLDQMask(MVT VT, unsigned Imm, SmallVectorImpl<int> &ShuffleMask);
@@ -51,6 +53,9 @@ void DecodePSHUFMask(MVT VT, unsigned Imm, SmallVectorImpl<int> &ShuffleMask);
 void DecodePSHUFHWMask(MVT VT, unsigned Imm, SmallVectorImpl<int> &ShuffleMask);
 
 void DecodePSHUFLWMask(MVT, unsigned Imm, SmallVectorImpl<int> &ShuffleMask);
+
+/// \brief Decodes a PSWAPD 3DNow! instruction.
+void DecodePSWAPMask(MVT VT, SmallVectorImpl<int> &ShuffleMask);
 
 /// DecodeSHUFPMask - This decodes the shuffle masks for shufp*. VT indicates
 /// the type of the vector allowing it to handle different datatypes and vector
@@ -88,6 +93,40 @@ void DecodeVPERMMask(unsigned Imm, SmallVectorImpl<int> &ShuffleMask);
 /// \brief Decode a VPERMILP variable mask from an IR-level vector constant.
 void DecodeVPERMILPMask(const Constant *C, SmallVectorImpl<int> &ShuffleMask);
 
+/// \brief Decode a zero extension instruction as a shuffle mask.
+void DecodeZeroExtendMask(MVT SrcVT, MVT DstVT,
+                          SmallVectorImpl<int> &ShuffleMask);
+
+/// \brief Decode a move lower and zero upper instruction as a shuffle mask.
+void DecodeZeroMoveLowMask(MVT VT, SmallVectorImpl<int> &ShuffleMask);
+
+/// \brief Decode a scalar float move instruction as a shuffle mask.
+void DecodeScalarMoveMask(MVT VT, bool IsLoad,
+                          SmallVectorImpl<int> &ShuffleMask);
+
+/// \brief Decode a SSE4A EXTRQ instruction as a v16i8 shuffle mask.
+void DecodeEXTRQIMask(int Len, int Idx,
+                      SmallVectorImpl<int> &ShuffleMask);
+
+/// \brief Decode a SSE4A INSERTQ instruction as a v16i8 shuffle mask.
+void DecodeINSERTQIMask(int Len, int Idx,
+                        SmallVectorImpl<int> &ShuffleMask);
+
+/// \brief Decode a VPERM W/D/Q/PS/PD mask from an IR-level vector constant.
+void DecodeVPERMVMask(const Constant *C, MVT VT,
+                      SmallVectorImpl<int> &ShuffleMask);
+
+/// \brief Decode a VPERM W/D/Q/PS/PD mask from a raw array of constants.
+void DecodeVPERMVMask(ArrayRef<uint64_t> RawMask,
+                      SmallVectorImpl<int> &ShuffleMask);
+
+/// \brief Decode a VPERMT2 W/D/Q/PS/PD mask from an IR-level vector constant.
+void DecodeVPERMV3Mask(const Constant *C, MVT VT,
+                      SmallVectorImpl<int> &ShuffleMask);
+
+/// \brief Decode a VPERMT2 W/D/Q/PS/PD mask from a raw array of constants.
+void DecodeVPERMV3Mask(ArrayRef<uint64_t> RawMask,
+                      SmallVectorImpl<int> &ShuffleMask);
 } // llvm namespace
 
 #endif

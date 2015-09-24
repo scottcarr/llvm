@@ -13,6 +13,7 @@
 
 #include "llvm/Object/ELFYAML.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/MipsABIFlags.h"
 
 namespace llvm {
 
@@ -30,6 +31,7 @@ ScalarEnumerationTraits<ELFYAML::ELF_ET>::enumeration(IO &IO,
   ECase(ET_DYN)
   ECase(ET_CORE)
 #undef ECase
+  IO.enumFallback<Hex16>(Value);
 }
 
 void
@@ -42,7 +44,7 @@ ScalarEnumerationTraits<ELFYAML::ELF_EM>::enumeration(IO &IO,
   ECase(EM_386)
   ECase(EM_68K)
   ECase(EM_88K)
-  ECase(EM_486)
+  ECase(EM_IAMCU)
   ECase(EM_860)
   ECase(EM_MIPS)
   ECase(EM_S370)
@@ -191,6 +193,7 @@ ScalarEnumerationTraits<ELFYAML::ELF_EM>::enumeration(IO &IO,
   ECase(EM_VIDEOCORE5)
   ECase(EM_78KOR)
   ECase(EM_56800EX)
+  ECase(EM_AMDGPU)
 #undef ECase
 }
 
@@ -234,6 +237,7 @@ void ScalarEnumerationTraits<ELFYAML::ELF_ELFOSABI>::enumeration(
   ECase(ELFOSABI_NSK)
   ECase(ELFOSABI_AROS)
   ECase(ELFOSABI_FENIXOS)
+  ECase(ELFOSABI_CLOUDABI)
   ECase(ELFOSABI_C6000_ELFABI)
   ECase(ELFOSABI_C6000_LINUX)
   ECase(ELFOSABI_ARM)
@@ -264,10 +268,33 @@ void ScalarBitSetTraits<ELFYAML::ELF_EF>::bitset(IO &IO,
     BCase(EF_MIPS_CPIC)
     BCase(EF_MIPS_ABI2)
     BCase(EF_MIPS_32BITMODE)
+    BCase(EF_MIPS_FP64)
     BCase(EF_MIPS_NAN2008)
-    BCase(EF_MIPS_ABI_O32)
     BCase(EF_MIPS_MICROMIPS)
     BCase(EF_MIPS_ARCH_ASE_M16)
+    BCase(EF_MIPS_ARCH_ASE_MDMX)
+    BCaseMask(EF_MIPS_ABI_O32, EF_MIPS_ABI)
+    BCaseMask(EF_MIPS_ABI_O64, EF_MIPS_ABI)
+    BCaseMask(EF_MIPS_ABI_EABI32, EF_MIPS_ABI)
+    BCaseMask(EF_MIPS_ABI_EABI64, EF_MIPS_ABI)
+    BCaseMask(EF_MIPS_MACH_3900, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_4010, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_4100, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_4650, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_4120, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_4111, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_SB1, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_OCTEON, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_XLR, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_OCTEON2, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_OCTEON3, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_5400, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_5900, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_5500, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_9000, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_LS2E, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_LS2F, EF_MIPS_MACH)
+    BCaseMask(EF_MIPS_MACH_LS3A, EF_MIPS_MACH)
     BCaseMask(EF_MIPS_ARCH_1, EF_MIPS_ARCH)
     BCaseMask(EF_MIPS_ARCH_2, EF_MIPS_ARCH)
     BCaseMask(EF_MIPS_ARCH_3, EF_MIPS_ARCH)
@@ -414,354 +441,131 @@ void ScalarBitSetTraits<ELFYAML::ELF_STO>::bitset(IO &IO,
 #undef BCaseMask
 }
 
+void ScalarEnumerationTraits<ELFYAML::ELF_RSS>::enumeration(
+    IO &IO, ELFYAML::ELF_RSS &Value) {
+#define ECase(X) IO.enumCase(Value, #X, ELF::X);
+  ECase(RSS_UNDEF)
+  ECase(RSS_GP)
+  ECase(RSS_GP0)
+  ECase(RSS_LOC)
+#undef ECase
+}
+
 void ScalarEnumerationTraits<ELFYAML::ELF_REL>::enumeration(
     IO &IO, ELFYAML::ELF_REL &Value) {
   const auto *Object = static_cast<ELFYAML::Object *>(IO.getContext());
   assert(Object && "The IO context is not initialized");
-#define ECase(X) IO.enumCase(Value, #X, ELF::X);
+#define ELF_RELOC(X, Y) IO.enumCase(Value, #X, ELF::X);
   switch (Object->Header.Machine) {
   case ELF::EM_X86_64:
-    ECase(R_X86_64_NONE)
-    ECase(R_X86_64_64)
-    ECase(R_X86_64_PC32)
-    ECase(R_X86_64_GOT32)
-    ECase(R_X86_64_PLT32)
-    ECase(R_X86_64_COPY)
-    ECase(R_X86_64_GLOB_DAT)
-    ECase(R_X86_64_JUMP_SLOT)
-    ECase(R_X86_64_RELATIVE)
-    ECase(R_X86_64_GOTPCREL)
-    ECase(R_X86_64_32)
-    ECase(R_X86_64_32S)
-    ECase(R_X86_64_16)
-    ECase(R_X86_64_PC16)
-    ECase(R_X86_64_8)
-    ECase(R_X86_64_PC8)
-    ECase(R_X86_64_DTPMOD64)
-    ECase(R_X86_64_DTPOFF64)
-    ECase(R_X86_64_TPOFF64)
-    ECase(R_X86_64_TLSGD)
-    ECase(R_X86_64_TLSLD)
-    ECase(R_X86_64_DTPOFF32)
-    ECase(R_X86_64_GOTTPOFF)
-    ECase(R_X86_64_TPOFF32)
-    ECase(R_X86_64_PC64)
-    ECase(R_X86_64_GOTOFF64)
-    ECase(R_X86_64_GOTPC32)
-    ECase(R_X86_64_GOT64)
-    ECase(R_X86_64_GOTPCREL64)
-    ECase(R_X86_64_GOTPC64)
-    ECase(R_X86_64_GOTPLT64)
-    ECase(R_X86_64_PLTOFF64)
-    ECase(R_X86_64_SIZE32)
-    ECase(R_X86_64_SIZE64)
-    ECase(R_X86_64_GOTPC32_TLSDESC)
-    ECase(R_X86_64_TLSDESC_CALL)
-    ECase(R_X86_64_TLSDESC)
-    ECase(R_X86_64_IRELATIVE)
+#include "llvm/Support/ELFRelocs/x86_64.def"
     break;
   case ELF::EM_MIPS:
-    ECase(R_MIPS_NONE)
-    ECase(R_MIPS_16)
-    ECase(R_MIPS_32)
-    ECase(R_MIPS_REL32)
-    ECase(R_MIPS_26)
-    ECase(R_MIPS_HI16)
-    ECase(R_MIPS_LO16)
-    ECase(R_MIPS_GPREL16)
-    ECase(R_MIPS_LITERAL)
-    ECase(R_MIPS_GOT16)
-    ECase(R_MIPS_PC16)
-    ECase(R_MIPS_CALL16)
-    ECase(R_MIPS_GPREL32)
-    ECase(R_MIPS_UNUSED1)
-    ECase(R_MIPS_UNUSED2)
-    ECase(R_MIPS_SHIFT5)
-    ECase(R_MIPS_SHIFT6)
-    ECase(R_MIPS_64)
-    ECase(R_MIPS_GOT_DISP)
-    ECase(R_MIPS_GOT_PAGE)
-    ECase(R_MIPS_GOT_OFST)
-    ECase(R_MIPS_GOT_HI16)
-    ECase(R_MIPS_GOT_LO16)
-    ECase(R_MIPS_SUB)
-    ECase(R_MIPS_INSERT_A)
-    ECase(R_MIPS_INSERT_B)
-    ECase(R_MIPS_DELETE)
-    ECase(R_MIPS_HIGHER)
-    ECase(R_MIPS_HIGHEST)
-    ECase(R_MIPS_CALL_HI16)
-    ECase(R_MIPS_CALL_LO16)
-    ECase(R_MIPS_SCN_DISP)
-    ECase(R_MIPS_REL16)
-    ECase(R_MIPS_ADD_IMMEDIATE)
-    ECase(R_MIPS_PJUMP)
-    ECase(R_MIPS_RELGOT)
-    ECase(R_MIPS_JALR)
-    ECase(R_MIPS_TLS_DTPMOD32)
-    ECase(R_MIPS_TLS_DTPREL32)
-    ECase(R_MIPS_TLS_DTPMOD64)
-    ECase(R_MIPS_TLS_DTPREL64)
-    ECase(R_MIPS_TLS_GD)
-    ECase(R_MIPS_TLS_LDM)
-    ECase(R_MIPS_TLS_DTPREL_HI16)
-    ECase(R_MIPS_TLS_DTPREL_LO16)
-    ECase(R_MIPS_TLS_GOTTPREL)
-    ECase(R_MIPS_TLS_TPREL32)
-    ECase(R_MIPS_TLS_TPREL64)
-    ECase(R_MIPS_TLS_TPREL_HI16)
-    ECase(R_MIPS_TLS_TPREL_LO16)
-    ECase(R_MIPS_GLOB_DAT)
-    ECase(R_MIPS_PC21_S2)
-    ECase(R_MIPS_PC26_S2)
-    ECase(R_MIPS_PC18_S3)
-    ECase(R_MIPS_PC19_S2)
-    ECase(R_MIPS_PCHI16)
-    ECase(R_MIPS_PCLO16)
-    ECase(R_MIPS16_GOT16)
-    ECase(R_MIPS16_HI16)
-    ECase(R_MIPS16_LO16)
-    ECase(R_MIPS_COPY)
-    ECase(R_MIPS_JUMP_SLOT)
-    ECase(R_MICROMIPS_26_S1)
-    ECase(R_MICROMIPS_HI16)
-    ECase(R_MICROMIPS_LO16)
-    ECase(R_MICROMIPS_GOT16)
-    ECase(R_MICROMIPS_PC16_S1)
-    ECase(R_MICROMIPS_CALL16)
-    ECase(R_MICROMIPS_GOT_DISP)
-    ECase(R_MICROMIPS_GOT_PAGE)
-    ECase(R_MICROMIPS_GOT_OFST)
-    ECase(R_MICROMIPS_TLS_GD)
-    ECase(R_MICROMIPS_TLS_LDM)
-    ECase(R_MICROMIPS_TLS_DTPREL_HI16)
-    ECase(R_MICROMIPS_TLS_DTPREL_LO16)
-    ECase(R_MICROMIPS_TLS_TPREL_HI16)
-    ECase(R_MICROMIPS_TLS_TPREL_LO16)
-    ECase(R_MIPS_NUM)
-    ECase(R_MIPS_PC32)
+#include "llvm/Support/ELFRelocs/Mips.def"
     break;
   case ELF::EM_HEXAGON:
-    ECase(R_HEX_NONE)
-    ECase(R_HEX_B22_PCREL)
-    ECase(R_HEX_B15_PCREL)
-    ECase(R_HEX_B7_PCREL)
-    ECase(R_HEX_LO16)
-    ECase(R_HEX_HI16)
-    ECase(R_HEX_32)
-    ECase(R_HEX_16)
-    ECase(R_HEX_8)
-    ECase(R_HEX_GPREL16_0)
-    ECase(R_HEX_GPREL16_1)
-    ECase(R_HEX_GPREL16_2)
-    ECase(R_HEX_GPREL16_3)
-    ECase(R_HEX_HL16)
-    ECase(R_HEX_B13_PCREL)
-    ECase(R_HEX_B9_PCREL)
-    ECase(R_HEX_B32_PCREL_X)
-    ECase(R_HEX_32_6_X)
-    ECase(R_HEX_B22_PCREL_X)
-    ECase(R_HEX_B15_PCREL_X)
-    ECase(R_HEX_B13_PCREL_X)
-    ECase(R_HEX_B9_PCREL_X)
-    ECase(R_HEX_B7_PCREL_X)
-    ECase(R_HEX_16_X)
-    ECase(R_HEX_12_X)
-    ECase(R_HEX_11_X)
-    ECase(R_HEX_10_X)
-    ECase(R_HEX_9_X)
-    ECase(R_HEX_8_X)
-    ECase(R_HEX_7_X)
-    ECase(R_HEX_6_X)
-    ECase(R_HEX_32_PCREL)
-    ECase(R_HEX_COPY)
-    ECase(R_HEX_GLOB_DAT)
-    ECase(R_HEX_JMP_SLOT)
-    ECase(R_HEX_RELATIVE)
-    ECase(R_HEX_PLT_B22_PCREL)
-    ECase(R_HEX_GOTREL_LO16)
-    ECase(R_HEX_GOTREL_HI16)
-    ECase(R_HEX_GOTREL_32)
-    ECase(R_HEX_GOT_LO16)
-    ECase(R_HEX_GOT_HI16)
-    ECase(R_HEX_GOT_32)
-    ECase(R_HEX_GOT_16)
-    ECase(R_HEX_DTPMOD_32)
-    ECase(R_HEX_DTPREL_LO16)
-    ECase(R_HEX_DTPREL_HI16)
-    ECase(R_HEX_DTPREL_32)
-    ECase(R_HEX_DTPREL_16)
-    ECase(R_HEX_GD_PLT_B22_PCREL)
-    ECase(R_HEX_GD_GOT_LO16)
-    ECase(R_HEX_GD_GOT_HI16)
-    ECase(R_HEX_GD_GOT_32)
-    ECase(R_HEX_GD_GOT_16)
-    ECase(R_HEX_IE_LO16)
-    ECase(R_HEX_IE_HI16)
-    ECase(R_HEX_IE_32)
-    ECase(R_HEX_IE_GOT_LO16)
-    ECase(R_HEX_IE_GOT_HI16)
-    ECase(R_HEX_IE_GOT_32)
-    ECase(R_HEX_IE_GOT_16)
-    ECase(R_HEX_TPREL_LO16)
-    ECase(R_HEX_TPREL_HI16)
-    ECase(R_HEX_TPREL_32)
-    ECase(R_HEX_TPREL_16)
-    ECase(R_HEX_6_PCREL_X)
-    ECase(R_HEX_GOTREL_32_6_X)
-    ECase(R_HEX_GOTREL_16_X)
-    ECase(R_HEX_GOTREL_11_X)
-    ECase(R_HEX_GOT_32_6_X)
-    ECase(R_HEX_GOT_16_X)
-    ECase(R_HEX_GOT_11_X)
-    ECase(R_HEX_DTPREL_32_6_X)
-    ECase(R_HEX_DTPREL_16_X)
-    ECase(R_HEX_DTPREL_11_X)
-    ECase(R_HEX_GD_GOT_32_6_X)
-    ECase(R_HEX_GD_GOT_16_X)
-    ECase(R_HEX_GD_GOT_11_X)
-    ECase(R_HEX_IE_32_6_X)
-    ECase(R_HEX_IE_16_X)
-    ECase(R_HEX_IE_GOT_32_6_X)
-    ECase(R_HEX_IE_GOT_16_X)
-    ECase(R_HEX_IE_GOT_11_X)
-    ECase(R_HEX_TPREL_32_6_X)
-    ECase(R_HEX_TPREL_16_X)
-    ECase(R_HEX_TPREL_11_X)
+#include "llvm/Support/ELFRelocs/Hexagon.def"
     break;
   case ELF::EM_386:
-    ECase(R_386_NONE)
-    ECase(R_386_32)
-    ECase(R_386_PC32)
-    ECase(R_386_GOT32)
-    ECase(R_386_PLT32)
-    ECase(R_386_COPY)
-    ECase(R_386_GLOB_DAT)
-    ECase(R_386_JUMP_SLOT)
-    ECase(R_386_RELATIVE)
-    ECase(R_386_GOTOFF)
-    ECase(R_386_GOTPC)
-    ECase(R_386_32PLT)
-    ECase(R_386_TLS_TPOFF)
-    ECase(R_386_TLS_IE)
-    ECase(R_386_TLS_GOTIE)
-    ECase(R_386_TLS_LE)
-    ECase(R_386_TLS_GD)
-    ECase(R_386_TLS_LDM)
-    ECase(R_386_16)
-    ECase(R_386_PC16)
-    ECase(R_386_8)
-    ECase(R_386_PC8)
-    ECase(R_386_TLS_GD_32)
-    ECase(R_386_TLS_GD_PUSH)
-    ECase(R_386_TLS_GD_CALL)
-    ECase(R_386_TLS_GD_POP)
-    ECase(R_386_TLS_LDM_32)
-    ECase(R_386_TLS_LDM_PUSH)
-    ECase(R_386_TLS_LDM_CALL)
-    ECase(R_386_TLS_LDM_POP)
-    ECase(R_386_TLS_LDO_32)
-    ECase(R_386_TLS_IE_32)
-    ECase(R_386_TLS_LE_32)
-    ECase(R_386_TLS_DTPMOD32)
-    ECase(R_386_TLS_DTPOFF32)
-    ECase(R_386_TLS_TPOFF32)
-    ECase(R_386_TLS_GOTDESC)
-    ECase(R_386_TLS_DESC_CALL)
-    ECase(R_386_TLS_DESC)
-    ECase(R_386_IRELATIVE)
-    ECase(R_386_NUM)
+#include "llvm/Support/ELFRelocs/i386.def"
     break;
   case ELF::EM_AARCH64:
-    ECase(R_AARCH64_NONE)
-    ECase(R_AARCH64_ABS64)
-    ECase(R_AARCH64_ABS32)
-    ECase(R_AARCH64_ABS16)
-    ECase(R_AARCH64_PREL64)
-    ECase(R_AARCH64_PREL32)
-    ECase(R_AARCH64_PREL16)
-    ECase(R_AARCH64_MOVW_UABS_G0)
-    ECase(R_AARCH64_MOVW_UABS_G0_NC)
-    ECase(R_AARCH64_MOVW_UABS_G1)
-    ECase(R_AARCH64_MOVW_UABS_G1_NC)
-    ECase(R_AARCH64_MOVW_UABS_G2)
-    ECase(R_AARCH64_MOVW_UABS_G2_NC)
-    ECase(R_AARCH64_MOVW_UABS_G3)
-    ECase(R_AARCH64_MOVW_SABS_G0)
-    ECase(R_AARCH64_MOVW_SABS_G1)
-    ECase(R_AARCH64_MOVW_SABS_G2)
-    ECase(R_AARCH64_LD_PREL_LO19)
-    ECase(R_AARCH64_ADR_PREL_LO21)
-    ECase(R_AARCH64_ADR_PREL_PG_HI21)
-    ECase(R_AARCH64_ADD_ABS_LO12_NC)
-    ECase(R_AARCH64_LDST8_ABS_LO12_NC)
-    ECase(R_AARCH64_TSTBR14)
-    ECase(R_AARCH64_CONDBR19)
-    ECase(R_AARCH64_JUMP26)
-    ECase(R_AARCH64_CALL26)
-    ECase(R_AARCH64_LDST16_ABS_LO12_NC)
-    ECase(R_AARCH64_LDST32_ABS_LO12_NC)
-    ECase(R_AARCH64_LDST64_ABS_LO12_NC)
-    ECase(R_AARCH64_LDST128_ABS_LO12_NC)
-    ECase(R_AARCH64_GOTREL64)
-    ECase(R_AARCH64_GOTREL32)
-    ECase(R_AARCH64_ADR_GOT_PAGE)
-    ECase(R_AARCH64_LD64_GOT_LO12_NC)
-    ECase(R_AARCH64_TLSLD_MOVW_DTPREL_G2)
-    ECase(R_AARCH64_TLSLD_MOVW_DTPREL_G1)
-    ECase(R_AARCH64_TLSLD_MOVW_DTPREL_G1_NC)
-    ECase(R_AARCH64_TLSLD_MOVW_DTPREL_G0)
-    ECase(R_AARCH64_TLSLD_MOVW_DTPREL_G0_NC)
-    ECase(R_AARCH64_TLSLD_ADD_DTPREL_HI12)
-    ECase(R_AARCH64_TLSLD_ADD_DTPREL_LO12)
-    ECase(R_AARCH64_TLSLD_ADD_DTPREL_LO12_NC)
-    ECase(R_AARCH64_TLSLD_LDST8_DTPREL_LO12)
-    ECase(R_AARCH64_TLSLD_LDST8_DTPREL_LO12_NC)
-    ECase(R_AARCH64_TLSLD_LDST16_DTPREL_LO12)
-    ECase(R_AARCH64_TLSLD_LDST16_DTPREL_LO12_NC)
-    ECase(R_AARCH64_TLSLD_LDST32_DTPREL_LO12)
-    ECase(R_AARCH64_TLSLD_LDST32_DTPREL_LO12_NC)
-    ECase(R_AARCH64_TLSLD_LDST64_DTPREL_LO12)
-    ECase(R_AARCH64_TLSLD_LDST64_DTPREL_LO12_NC)
-    ECase(R_AARCH64_TLSIE_MOVW_GOTTPREL_G1)
-    ECase(R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC)
-    ECase(R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21)
-    ECase(R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC)
-    ECase(R_AARCH64_TLSIE_LD_GOTTPREL_PREL19)
-    ECase(R_AARCH64_TLSLE_MOVW_TPREL_G2)
-    ECase(R_AARCH64_TLSLE_MOVW_TPREL_G1)
-    ECase(R_AARCH64_TLSLE_MOVW_TPREL_G1_NC)
-    ECase(R_AARCH64_TLSLE_MOVW_TPREL_G0)
-    ECase(R_AARCH64_TLSLE_MOVW_TPREL_G0_NC)
-    ECase(R_AARCH64_TLSLE_ADD_TPREL_HI12)
-    ECase(R_AARCH64_TLSLE_ADD_TPREL_LO12)
-    ECase(R_AARCH64_TLSLE_ADD_TPREL_LO12_NC)
-    ECase(R_AARCH64_TLSLE_LDST8_TPREL_LO12)
-    ECase(R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC)
-    ECase(R_AARCH64_TLSLE_LDST16_TPREL_LO12)
-    ECase(R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC)
-    ECase(R_AARCH64_TLSLE_LDST32_TPREL_LO12)
-    ECase(R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC)
-    ECase(R_AARCH64_TLSLE_LDST64_TPREL_LO12)
-    ECase(R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC)
-    ECase(R_AARCH64_TLSDESC_ADR_PAGE)
-    ECase(R_AARCH64_TLSDESC_LD64_LO12_NC)
-    ECase(R_AARCH64_TLSDESC_ADD_LO12_NC)
-    ECase(R_AARCH64_TLSDESC_CALL)
-    ECase(R_AARCH64_COPY)
-    ECase(R_AARCH64_GLOB_DAT)
-    ECase(R_AARCH64_JUMP_SLOT)
-    ECase(R_AARCH64_RELATIVE)
-    ECase(R_AARCH64_TLS_DTPREL64)
-    ECase(R_AARCH64_TLS_DTPMOD64)
-    ECase(R_AARCH64_TLS_TPREL64)
-    ECase(R_AARCH64_TLSDESC)
-    ECase(R_AARCH64_IRELATIVE)
+#include "llvm/Support/ELFRelocs/AArch64.def"
+    break;
+  case ELF::EM_ARM:
+#include "llvm/Support/ELFRelocs/ARM.def"
     break;
   default:
     llvm_unreachable("Unsupported architecture");
   }
+#undef ELF_RELOC
+}
+
+void ScalarEnumerationTraits<ELFYAML::MIPS_AFL_REG>::enumeration(
+    IO &IO, ELFYAML::MIPS_AFL_REG &Value) {
+#define ECase(X) IO.enumCase(Value, #X, Mips::AFL_##X);
+  ECase(REG_NONE)
+  ECase(REG_32)
+  ECase(REG_64)
+  ECase(REG_128)
 #undef ECase
+}
+
+void ScalarEnumerationTraits<ELFYAML::MIPS_ABI_FP>::enumeration(
+    IO &IO, ELFYAML::MIPS_ABI_FP &Value) {
+#define ECase(X) IO.enumCase(Value, #X, Mips::Val_GNU_MIPS_ABI_##X);
+  ECase(FP_ANY)
+  ECase(FP_DOUBLE)
+  ECase(FP_SINGLE)
+  ECase(FP_SOFT)
+  ECase(FP_OLD_64)
+  ECase(FP_XX)
+  ECase(FP_64)
+  ECase(FP_64A)
+#undef ECase
+}
+
+void ScalarEnumerationTraits<ELFYAML::MIPS_AFL_EXT>::enumeration(
+    IO &IO, ELFYAML::MIPS_AFL_EXT &Value) {
+#define ECase(X) IO.enumCase(Value, #X, Mips::AFL_##X);
+  ECase(EXT_NONE)
+  ECase(EXT_XLR)
+  ECase(EXT_OCTEON2)
+  ECase(EXT_OCTEONP)
+  ECase(EXT_LOONGSON_3A)
+  ECase(EXT_OCTEON)
+  ECase(EXT_5900)
+  ECase(EXT_4650)
+  ECase(EXT_4010)
+  ECase(EXT_4100)
+  ECase(EXT_3900)
+  ECase(EXT_10000)
+  ECase(EXT_SB1)
+  ECase(EXT_4111)
+  ECase(EXT_4120)
+  ECase(EXT_5400)
+  ECase(EXT_5500)
+  ECase(EXT_LOONGSON_2E)
+  ECase(EXT_LOONGSON_2F)
+  ECase(EXT_OCTEON3)
+#undef ECase
+}
+
+void ScalarEnumerationTraits<ELFYAML::MIPS_ISA>::enumeration(
+    IO &IO, ELFYAML::MIPS_ISA &Value) {
+  IO.enumCase(Value, "MIPS1", 1);
+  IO.enumCase(Value, "MIPS2", 2);
+  IO.enumCase(Value, "MIPS3", 3);
+  IO.enumCase(Value, "MIPS4", 4);
+  IO.enumCase(Value, "MIPS5", 5);
+  IO.enumCase(Value, "MIPS32", 32);
+  IO.enumCase(Value, "MIPS64", 64);
+}
+
+void ScalarBitSetTraits<ELFYAML::MIPS_AFL_ASE>::bitset(
+    IO &IO, ELFYAML::MIPS_AFL_ASE &Value) {
+#define BCase(X) IO.bitSetCase(Value, #X, Mips::AFL_ASE_##X);
+  BCase(DSP)
+  BCase(DSPR2)
+  BCase(EVA)
+  BCase(MCU)
+  BCase(MDMX)
+  BCase(MIPS3D)
+  BCase(MT)
+  BCase(SMARTMIPS)
+  BCase(VIRT)
+  BCase(MSA)
+  BCase(MIPS16)
+  BCase(MICROMIPS)
+  BCase(XPA)
+#undef BCase
+}
+
+void ScalarBitSetTraits<ELFYAML::MIPS_AFL_FLAGS1>::bitset(
+    IO &IO, ELFYAML::MIPS_AFL_FLAGS1 &Value) {
+#define BCase(X) IO.bitSetCase(Value, #X, Mips::AFL_FLAGS1_##X);
+  BCase(ODDSPREG)
+#undef BCase
 }
 
 void MappingTraits<ELFYAML::FileHeader>::mapping(IO &IO,
@@ -815,6 +619,7 @@ static void commonSectionMapping(IO &IO, ELFYAML::Section &Section) {
   IO.mapOptional("Address", Section.Address, Hex64(0));
   IO.mapOptional("Link", Section.Link, StringRef());
   IO.mapOptional("AddressAlign", Section.AddressAlign, Hex64(0));
+  IO.mapOptional("Info", Section.Info, StringRef());
 }
 
 static void sectionMapping(IO &IO, ELFYAML::RawContentSection &Section) {
@@ -823,10 +628,44 @@ static void sectionMapping(IO &IO, ELFYAML::RawContentSection &Section) {
   IO.mapOptional("Size", Section.Size, Hex64(Section.Content.binary_size()));
 }
 
+static void sectionMapping(IO &IO, ELFYAML::NoBitsSection &Section) {
+  commonSectionMapping(IO, Section);
+  IO.mapOptional("Size", Section.Size, Hex64(0));
+}
+
 static void sectionMapping(IO &IO, ELFYAML::RelocationSection &Section) {
   commonSectionMapping(IO, Section);
-  IO.mapOptional("Info", Section.Info, StringRef());
   IO.mapOptional("Relocations", Section.Relocations);
+}
+
+static void groupSectionMapping(IO &IO, ELFYAML::Group &group) {
+  commonSectionMapping(IO, group);
+  IO.mapRequired("Members", group.Members);
+}
+
+void MappingTraits<ELFYAML::SectionOrType>::mapping(
+    IO &IO, ELFYAML::SectionOrType &sectionOrType) {
+  IO.mapRequired("SectionOrType", sectionOrType.sectionNameOrType);
+}
+
+static void sectionMapping(IO &IO, ELFYAML::MipsABIFlags &Section) {
+  commonSectionMapping(IO, Section);
+  IO.mapOptional("Version", Section.Version, Hex16(0));
+  IO.mapRequired("ISA", Section.ISALevel);
+  IO.mapOptional("ISARevision", Section.ISARevision, Hex8(0));
+  IO.mapOptional("ISAExtension", Section.ISAExtension,
+                 ELFYAML::MIPS_AFL_EXT(Mips::AFL_EXT_NONE));
+  IO.mapOptional("ASEs", Section.ASEs, ELFYAML::MIPS_AFL_ASE(0));
+  IO.mapOptional("FpABI", Section.FpABI,
+                 ELFYAML::MIPS_ABI_FP(Mips::Val_GNU_MIPS_ABI_FP_ANY));
+  IO.mapOptional("GPRSize", Section.GPRSize,
+                 ELFYAML::MIPS_AFL_REG(Mips::AFL_REG_NONE));
+  IO.mapOptional("CPR1Size", Section.CPR1Size,
+                 ELFYAML::MIPS_AFL_REG(Mips::AFL_REG_NONE));
+  IO.mapOptional("CPR2Size", Section.CPR2Size,
+                 ELFYAML::MIPS_AFL_REG(Mips::AFL_REG_NONE));
+  IO.mapOptional("Flags1", Section.Flags1, ELFYAML::MIPS_AFL_FLAGS1(0));
+  IO.mapOptional("Flags2", Section.Flags2, Hex32(0));
 }
 
 void MappingTraits<std::unique_ptr<ELFYAML::Section>>::mapping(
@@ -844,6 +683,21 @@ void MappingTraits<std::unique_ptr<ELFYAML::Section>>::mapping(
       Section.reset(new ELFYAML::RelocationSection());
     sectionMapping(IO, *cast<ELFYAML::RelocationSection>(Section.get()));
     break;
+  case ELF::SHT_GROUP:
+    if (!IO.outputting())
+      Section.reset(new ELFYAML::Group());
+    groupSectionMapping(IO, *cast<ELFYAML::Group>(Section.get()));
+    break;
+  case ELF::SHT_NOBITS:
+    if (!IO.outputting())
+      Section.reset(new ELFYAML::NoBitsSection());
+    sectionMapping(IO, *cast<ELFYAML::NoBitsSection>(Section.get()));
+    break;
+  case ELF::SHT_MIPS_ABIFLAGS:
+    if (!IO.outputting())
+      Section.reset(new ELFYAML::MipsABIFlags());
+    sectionMapping(IO, *cast<ELFYAML::MipsABIFlags>(Section.get()));
+    break;
   default:
     if (!IO.outputting())
       Section.reset(new ELFYAML::RawContentSection());
@@ -859,12 +713,49 @@ StringRef MappingTraits<std::unique_ptr<ELFYAML::Section>>::validate(
   return "Section size must be greater or equal to the content size";
 }
 
+namespace {
+struct NormalizedMips64RelType {
+  NormalizedMips64RelType(IO &)
+      : Type(ELFYAML::ELF_REL(ELF::R_MIPS_NONE)),
+        Type2(ELFYAML::ELF_REL(ELF::R_MIPS_NONE)),
+        Type3(ELFYAML::ELF_REL(ELF::R_MIPS_NONE)),
+        SpecSym(ELFYAML::ELF_REL(ELF::RSS_UNDEF)) {}
+  NormalizedMips64RelType(IO &, ELFYAML::ELF_REL Original)
+      : Type(Original & 0xFF), Type2(Original >> 8 & 0xFF),
+        Type3(Original >> 16 & 0xFF), SpecSym(Original >> 24 & 0xFF) {}
+
+  ELFYAML::ELF_REL denormalize(IO &) {
+    ELFYAML::ELF_REL Res = Type | Type2 << 8 | Type3 << 16 | SpecSym << 24;
+    return Res;
+  }
+
+  ELFYAML::ELF_REL Type;
+  ELFYAML::ELF_REL Type2;
+  ELFYAML::ELF_REL Type3;
+  ELFYAML::ELF_RSS SpecSym;
+};
+}
+
 void MappingTraits<ELFYAML::Relocation>::mapping(IO &IO,
                                                  ELFYAML::Relocation &Rel) {
+  const auto *Object = static_cast<ELFYAML::Object *>(IO.getContext());
+  assert(Object && "The IO context is not initialized");
+
   IO.mapRequired("Offset", Rel.Offset);
   IO.mapRequired("Symbol", Rel.Symbol);
-  IO.mapRequired("Type", Rel.Type);
-  IO.mapOptional("Addend", Rel.Addend);
+
+  if (Object->Header.Machine == ELFYAML::ELF_EM(ELF::EM_MIPS) &&
+      Object->Header.Class == ELFYAML::ELF_ELFCLASS(ELF::ELFCLASS64)) {
+    MappingNormalization<NormalizedMips64RelType, ELFYAML::ELF_REL> Key(
+        IO, Rel.Type);
+    IO.mapRequired("Type", Key->Type);
+    IO.mapOptional("Type2", Key->Type2, ELFYAML::ELF_REL(ELF::R_MIPS_NONE));
+    IO.mapOptional("Type3", Key->Type3, ELFYAML::ELF_REL(ELF::R_MIPS_NONE));
+    IO.mapOptional("SpecSym", Key->SpecSym, ELFYAML::ELF_RSS(ELF::RSS_UNDEF));
+  } else
+    IO.mapRequired("Type", Rel.Type);
+
+  IO.mapOptional("Addend", Rel.Addend, (int64_t)0);
 }
 
 void MappingTraits<ELFYAML::Object>::mapping(IO &IO, ELFYAML::Object &Object) {
@@ -875,6 +766,12 @@ void MappingTraits<ELFYAML::Object>::mapping(IO &IO, ELFYAML::Object &Object) {
   IO.mapOptional("Symbols", Object.Symbols);
   IO.setContext(nullptr);
 }
+
+LLVM_YAML_STRONG_TYPEDEF(uint8_t, MIPS_AFL_REG)
+LLVM_YAML_STRONG_TYPEDEF(uint8_t, MIPS_ABI_FP)
+LLVM_YAML_STRONG_TYPEDEF(uint32_t, MIPS_AFL_EXT)
+LLVM_YAML_STRONG_TYPEDEF(uint32_t, MIPS_AFL_ASE)
+LLVM_YAML_STRONG_TYPEDEF(uint32_t, MIPS_AFL_FLAGS1)
 
 } // end namespace yaml
 } // end namespace llvm

@@ -11,12 +11,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/ADT/BitVector.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/VirtRegMap.h"
+#include "llvm/IR/Function.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetFrameLowering.h"
+#include "llvm/Target/TargetRegisterInfo.h"
+
+#define DEBUG_TYPE "target-reg-info"
 
 using namespace llvm;
 
@@ -108,7 +114,7 @@ TargetRegisterInfo::getAllocatableClass(const TargetRegisterClass *RC) const {
 /// register of the given type, picking the most sub register class of
 /// the right type that contains this physreg.
 const TargetRegisterClass *
-TargetRegisterInfo::getMinimalPhysRegClass(unsigned reg, EVT VT) const {
+TargetRegisterInfo::getMinimalPhysRegClass(unsigned reg, MVT VT) const {
   assert(isPhysicalRegister(reg) && "reg must be a physical register");
 
   // Pick the most sub register class of the right type that contains
@@ -265,7 +271,8 @@ TargetRegisterInfo::getRegAllocationHints(unsigned VirtReg,
                                           ArrayRef<MCPhysReg> Order,
                                           SmallVectorImpl<MCPhysReg> &Hints,
                                           const MachineFunction &MF,
-                                          const VirtRegMap *VRM) const {
+                                          const VirtRegMap *VRM,
+                                          const LiveRegMatrix *Matrix) const {
   const MachineRegisterInfo &MRI = MF.getRegInfo();
   std::pair<unsigned, unsigned> Hint = MRI.getRegAllocationHint(VirtReg);
 
@@ -293,3 +300,31 @@ TargetRegisterInfo::getRegAllocationHints(unsigned VirtReg,
   // All clear, tell the register allocator to prefer this register.
   Hints.push_back(Phys);
 }
+
+bool TargetRegisterInfo::canRealignStack(const MachineFunction &MF) const {
+  return !MF.getFunction()->hasFnAttribute("no-realign-stack");
+}
+
+bool TargetRegisterInfo::needsStackRealignment(
+    const MachineFunction &MF) const {
+  const MachineFrameInfo *MFI = MF.getFrameInfo();
+  const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
+  const Function *F = MF.getFunction();
+  unsigned StackAlign = TFI->getStackAlignment();
+  bool requiresRealignment = ((MFI->getMaxAlignment() > StackAlign) ||
+                              F->hasFnAttribute(Attribute::StackAlignment));
+  if (MF.getFunction()->hasFnAttribute("stackrealign") || requiresRealignment) {
+    if (canRealignStack(MF))
+      return true;
+    DEBUG(dbgs() << "Can't realign function's stack: " << F->getName() << "\n");
+  }
+  return false;
+}
+
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+void
+TargetRegisterInfo::dumpReg(unsigned Reg, unsigned SubRegIndex,
+                            const TargetRegisterInfo *TRI) {
+  dbgs() << PrintReg(Reg, TRI, SubRegIndex) << "\n";
+}
+#endif
