@@ -215,6 +215,9 @@ namespace llvm {
 
     /// Machine level options.
     MCTargetOptions MCOptions;
+
+    // flag enables data confidentiality pass
+    bool DataConf;
   };
 
 // Comparison operators:
