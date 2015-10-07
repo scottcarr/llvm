@@ -513,10 +513,8 @@ void SafeStack::moveDynamicAllocasToUnsafeStack(
 
 bool SafeStack::runOnFunction(Function &F) {
 
-
-  // WHY IS THE SAFE STACK PASS RUNNING!
-  // I'LL SHOW YOU!!!!
-  // TODO FIXME
+  // disable the safestack so that we can run our own
+  // dataconf version
   return false;
 
   llvm_unreachable("safestack disabled!!");
